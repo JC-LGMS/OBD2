@@ -39,6 +39,11 @@ SDK : `%LOCALAPPDATA%\Android\Sdk` (plateforme `android-37.0`, build-tools 36.0.
 & $adb shell am start -n com.obd2.jeancyril/.MainActivity
 ```
 
+Sur l'émulateur, garder **la debug** installée : chaque mise à jour se fait par `adb install -r`
+(même signature, données et icône du bureau conservées). Ne pas y installer la release : sa clé
+est différente, il faudrait désinstaller (données, raccourci du bureau et historique perdus). La
+release se vérifie par `apksigner` sans l'installer.
+
 AGP/Kotlin/Compose sont en cache : `--offline` suffit en général ; en cas de dépendance
 nouvelle, relancer une fois sans `--offline`.
 
