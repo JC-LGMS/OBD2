@@ -4,6 +4,7 @@ import android.content.Context
 import androidx.test.ext.junit.runners.AndroidJUnit4
 import androidx.test.platform.app.InstrumentationRegistry
 import com.obd2.jeancyril.data.Car
+import com.obd2.jeancyril.data.FuelFill
 import com.obd2.jeancyril.data.GarageStore
 import com.obd2.jeancyril.data.LogEntry
 import com.obd2.jeancyril.data.SensorOverride
@@ -42,7 +43,7 @@ class GarageStoreTest {
             overrides = mapOf(
                 "010C" to SensorOverride(label = "Tours", style = SensorStyles.DIAL),
             ),
-            lightTheme = true,
+            themeMode = "light",
         )
         store.saveCars(listOf(car))
         store.saveSettings(settings)
@@ -57,7 +58,7 @@ class GarageStoreTest {
         assertEquals(car.id, loadedSettings.activeCar)
         assertEquals(setOf("010C", "010D"), loadedSettings.dashboard)
         assertEquals(SensorStyles.DIAL, loadedSettings.overrides["010C"]?.style)
-        assertTrue(loadedSettings.lightTheme)
+        assertEquals("light", loadedSettings.themeMode)
 
         dir.deleteRecursively()
     }
@@ -90,8 +91,10 @@ class GarageStoreTest {
         val imageName = store.saveImage(android.net.Uri.fromFile(sourceImage))!!
         val car = Car(brand = "Toyota", model = "Yaris", plate = "XY-987-ZW", images = listOf(imageName), logCount = 1)
         store.appendLog(car.id, LogEntry(at = 42, kind = "note", text = "Plein"))
+        store.appendFill(car.id, FuelFill(at = 43, odometerKm = 12_000, liters = 40.0))
+        store.appendFill(car.id, FuelFill(at = 44, odometerKm = 12_600, liters = 42.0))
         store.saveCars(listOf(car))
-        store.saveSettings(Settings(activeCar = car.id, lightTheme = true))
+        store.saveSettings(Settings(activeCar = car.id, themeMode = "light"))
 
         val zip = File(context.cacheDir, "backup-test-${System.nanoTime()}.zip")
         store.exportBackup(android.net.Uri.fromFile(zip))
@@ -104,8 +107,9 @@ class GarageStoreTest {
         assertEquals(imageName, loaded.images.single())
         assertEquals(1, loaded.logCount)
         assertEquals("Plein", restored.loadLog(loaded.id).single().text)
+        assertEquals(2, restored.loadFills(loaded.id).size)
         assertTrue(restored.imageFile(imageName).exists())
-        assertTrue(restored.loadSettings().lightTheme)
+        assertEquals("light", restored.loadSettings().themeMode)
 
         sourceDir.deleteRecursively()
         targetDir.deleteRecursively()
@@ -127,6 +131,37 @@ class GarageStoreTest {
         assertEquals("legacy-1", car.id)
         assertEquals(1, car.logCount)
         assertEquals("Ancien", store.loadLog("legacy-1").single().text)
+
+        dir.deleteRecursively()
+    }
+
+    @Test
+    fun journalPagingAndSearch() {
+        val context: Context = InstrumentationRegistry.getInstrumentation().targetContext
+        val dir = File(context.cacheDir, "garage-test-${System.nanoTime()}")
+        val store = GarageStore(context, dir)
+        val carId = "car-page"
+        listOf(
+            LogEntry(at = 1, kind = "note", text = "Frein avant"),
+            LogEntry(at = 2, kind = "codes", text = "P0420"),
+            LogEntry(at = 3, kind = "note", text = "Frein arrière"),
+            LogEntry(at = 4, kind = "mesure", text = "0-100"),
+            LogEntry(at = 5, kind = "connexion", text = "Dongle"),
+        ).forEach { store.appendLog(carId, it) }
+
+        val newest = store.loadLogPage(carId, offset = 0, limit = 2)
+        assertEquals(5, newest.total)
+        assertEquals(listOf("0-100", "Dongle"), newest.entries.map { it.text })
+
+        val older = store.loadLogPage(carId, offset = 2, limit = 2)
+        assertEquals(listOf("P0420", "Frein arrière"), older.entries.map { it.text })
+
+        val searched = store.loadLogPage(carId, offset = 0, limit = 10, query = "frein")
+        assertEquals(2, searched.total)
+        assertEquals(listOf("Frein avant", "Frein arrière"), searched.entries.map { it.text })
+
+        val filtered = store.loadLogPage(carId, offset = 0, limit = 10, kinds = setOf("note"))
+        assertEquals(2, filtered.total)
 
         dir.deleteRecursively()
     }

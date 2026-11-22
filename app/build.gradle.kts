@@ -7,7 +7,7 @@ plugins {
     id("org.jetbrains.kotlin.plugin.compose")
 }
 
-val appVersionName = "1.1"
+val appVersionName = "1.2"
 val buildStamp = SimpleDateFormat("yyyyMMdd").format(Date())
 
 val keystoreProperties = Properties().apply {
@@ -23,7 +23,7 @@ android {
         applicationId = "com.obd2.jeancyril"
         minSdk = 26
         targetSdk = 37
-        versionCode = 2
+        versionCode = 3
         versionName = appVersionName
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
     }

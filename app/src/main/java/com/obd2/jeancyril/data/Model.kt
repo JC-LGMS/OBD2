@@ -18,8 +18,6 @@ data class Car(
     val plate: String = "",
     val images: List<String> = emptyList(),
     val logCount: Int = 0,
-    /** Journal chargé à la demande ; jamais écrit dans cars.json. */
-    val log: List<LogEntry> = emptyList(),
 ) {
     val title: String
         get() = listOf(brand, model).filter { it.isNotBlank() }.joinToString(" ").ifBlank { "Véhicule" }
@@ -64,7 +62,7 @@ data class Settings(
     val dashboard: Set<String> = DEFAULT_DASHBOARD,
     val activeCar: String? = null,
     val overrides: Map<String, SensorOverride> = emptyMap(),
-    val lightTheme: Boolean = false,
+    val themeMode: String = "dark",
 ) {
     companion object {
         val DEFAULT_DASHBOARD = setOf("010C", "010D", "0105", "0104", "0111", "012F")
@@ -72,6 +70,21 @@ data class Settings(
 }
 
 data class Sample(val at: Long, val value: Double)
+
+data class FuelFill(
+    val at: Long = System.currentTimeMillis(),
+    val odometerKm: Int,
+    val liters: Double,
+)
+
+data class JournalPage(val entries: List<LogEntry>, val total: Int)
+
+data class JournalState(
+    val entries: List<LogEntry> = emptyList(),
+    val total: Int = 0,
+    val hasMore: Boolean = false,
+    val loading: Boolean = false,
+)
 
 data class Dtc(
     val code: String,

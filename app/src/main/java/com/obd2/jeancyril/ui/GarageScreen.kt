@@ -29,7 +29,6 @@ import androidx.compose.material3.FilterChip
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedTextField
-import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
@@ -173,27 +172,32 @@ fun GarageScreen(vm: ObdViewModel, modifier: Modifier = Modifier, onOpenExtra: (
         item {
             Card(colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface)) {
                 Column {
-                    Row(
-                        Modifier
-                            .fillMaxWidth()
-                            .clickable { vm.setLightTheme(!settings.lightTheme) }
-                            .padding(14.dp),
-                        verticalAlignment = Alignment.CenterVertically,
-                    ) {
-                        Text("🌗", fontSize = 22.sp)
-                        Spacer(Modifier.width(12.dp))
-                        Column(Modifier.weight(1f)) {
-                            Text("Thème clair", style = MaterialTheme.typography.titleSmall)
-                            Text(
-                                if (settings.lightTheme) "Activé" else "Thème sombre",
-                                style = MaterialTheme.typography.labelSmall,
-                                color = MaterialTheme.colorScheme.onSurfaceVariant,
-                            )
+                    Column(Modifier.padding(14.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                        Row(verticalAlignment = Alignment.CenterVertically) {
+                            Text("🌗", fontSize = 22.sp)
+                            Spacer(Modifier.width(12.dp))
+                            Column {
+                                Text("Thème", style = MaterialTheme.typography.titleSmall)
+                                Text(
+                                    when (settings.themeMode) {
+                                        "light" -> "Clair"
+                                        "system" -> "Suit le système"
+                                        else -> "Sombre"
+                                    },
+                                    style = MaterialTheme.typography.labelSmall,
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                )
+                            }
                         }
-                        Switch(
-                            checked = settings.lightTheme,
-                            onCheckedChange = { vm.setLightTheme(it) },
-                        )
+                        Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                            listOf("dark" to "Sombre", "light" to "Clair", "system" to "Système").forEach { (mode, label) ->
+                                FilterChip(
+                                    selected = settings.themeMode == mode,
+                                    onClick = { vm.setThemeMode(mode) },
+                                    label = { Text(label) },
+                                )
+                            }
+                        }
                     }
                     HorizontalDivider(color = MaterialTheme.colorScheme.surfaceVariant)
                     ToolRow("📝", "Journal des actions", "Connexions, lectures, effacements, mesures, notes") { onOpenExtra(Routes.JOURNAL) }

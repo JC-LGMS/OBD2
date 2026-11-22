@@ -7,6 +7,19 @@ data class ChangelogEntry(val version: String, val date: String, val items: List
 object Changelog {
     val entries = listOf(
         ChangelogEntry(
+            version = "1.2",
+            date = "22/11/2026",
+            items = listOf(
+                "Recherche Bluetooth intégrée : connexion aux dongles non encore associés.",
+                "Consommation réelle plein à plein, y compris sur diesel.",
+                "Journal : recherche plein texte, filtres par type et chargement par pages.",
+                "Rapport de codes défauts partageable, enregistré dans le journal avant effacement.",
+                "Thème « Système » en plus des thèmes sombre et clair.",
+                "Changement de véhicule depuis le tableau de bord, avec accès direct à sa fiche.",
+                "La sauvegarde ZIP inclut désormais les pleins et le journal complet.",
+            ),
+        ),
+        ChangelogEntry(
             version = "1.1",
             date = "20/11/2026",
             items = listOf(

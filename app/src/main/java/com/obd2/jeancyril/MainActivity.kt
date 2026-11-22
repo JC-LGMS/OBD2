@@ -3,6 +3,7 @@ package com.obd2.jeancyril
 import android.os.Bundle
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
+import androidx.compose.foundation.isSystemInDarkTheme
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.lifecycle.viewmodel.compose.viewModel
@@ -15,7 +16,13 @@ class MainActivity : ComponentActivity() {
         setContent {
             val viewModel: ObdViewModel = viewModel()
             val settings by viewModel.settings.collectAsState()
-            ObdTheme(light = settings.lightTheme) {
+            val systemDark = isSystemInDarkTheme()
+            val light = when (settings.themeMode) {
+                "light" -> true
+                "system" -> !systemDark
+                else -> false
+            }
+            ObdTheme(light = light) {
                 ObdApp(viewModel)
             }
         }

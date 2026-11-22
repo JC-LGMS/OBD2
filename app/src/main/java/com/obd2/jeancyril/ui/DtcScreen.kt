@@ -28,6 +28,7 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
@@ -36,6 +37,7 @@ import com.obd2.jeancyril.ObdViewModel
 import com.obd2.jeancyril.data.ConnStatus
 import com.obd2.jeancyril.data.Dtc
 import com.obd2.jeancyril.data.MonitorStatus
+import android.content.Intent
 
 @Composable
 fun DtcScreen(vm: ObdViewModel, modifier: Modifier = Modifier) {
@@ -43,6 +45,7 @@ fun DtcScreen(vm: ObdViewModel, modifier: Modifier = Modifier) {
     val monitor by vm.monitor.collectAsState()
     val car by vm.activeCar.collectAsState()
     val connection by vm.connection.collectAsState()
+    val context = LocalContext.current
     var confirmClear by remember { mutableStateOf(false) }
     val connected = connection.status == ConnStatus.CONNECTED || connection.status == ConnStatus.SIMULATOR
     val allEmpty = dtcs.stored.isEmpty() && dtcs.pending.isEmpty() && dtcs.permanent.isEmpty()
@@ -77,6 +80,23 @@ fun DtcScreen(vm: ObdViewModel, modifier: Modifier = Modifier) {
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                 )
             }
+        }
+        item {
+            OutlinedButton(
+                onClick = {
+                    val report = vm.buildReport()
+                    if (report != null) {
+                        val intent = Intent(Intent.ACTION_SEND).apply {
+                            type = "text/plain"
+                            putExtra(Intent.EXTRA_SUBJECT, "Rapport OBD2")
+                            putExtra(Intent.EXTRA_TEXT, report)
+                        }
+                        context.startActivity(Intent.createChooser(intent, "Partager le rapport"))
+                    }
+                },
+                enabled = dtcs.lastReadAt > 0,
+                modifier = Modifier.fillMaxWidth(),
+            ) { Text("Partager le rapport") }
         }
         if (dtcs.loading) {
             item { LinearProgressIndicator(Modifier.fillMaxWidth()) }
@@ -136,7 +156,7 @@ fun DtcScreen(vm: ObdViewModel, modifier: Modifier = Modifier) {
     if (confirmClear) {
         ConfirmDialog(
             title = "Effacer les codes défauts ?",
-            text = "Cette commande efface les codes mémorisés et les données de diagnostic adaptatif. Les codes permanents peuvent réapparaître tant que le défaut n'est pas réparé. L'action est enregistrée dans le journal du véhicule.",
+            text = "Cette commande efface les codes mémorisés et les données de diagnostic adaptatif. Les codes permanents peuvent réapparaître tant que le défaut n'est pas réparé. Un rapport complet est enregistré dans le journal avant l'effacement.",
             confirmLabel = "Effacer",
             onConfirm = vm::clearCodes,
             onDismiss = { confirmClear = false },

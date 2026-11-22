@@ -1,10 +1,13 @@
 package com.obd2.jeancyril.ui
 
 import android.Manifest
+import android.bluetooth.BluetoothAdapter
 import android.bluetooth.BluetoothDevice
 import android.bluetooth.BluetoothManager
+import android.content.BroadcastReceiver
 import android.content.Context
 import android.content.Intent
+import android.content.IntentFilter
 import android.content.pm.PackageManager
 import android.os.Build
 import android.provider.Settings
@@ -20,6 +23,7 @@ import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.lazy.LazyRow
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
@@ -27,12 +31,14 @@ import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
+import androidx.compose.material3.FilterChip
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
@@ -51,6 +57,7 @@ import androidx.core.content.ContextCompat
 import com.obd2.jeancyril.ObdViewModel
 import com.obd2.jeancyril.data.ConnStatus
 import com.obd2.jeancyril.data.LogEntry
+import com.obd2.jeancyril.data.TripMath
 import kotlinx.coroutines.delay
 import java.text.SimpleDateFormat
 import java.util.Date
@@ -59,6 +66,13 @@ import java.util.Locale
 private fun bluetoothGranted(context: Context): Boolean =
     Build.VERSION.SDK_INT < Build.VERSION_CODES.S ||
         ContextCompat.checkSelfPermission(context, Manifest.permission.BLUETOOTH_CONNECT) == PackageManager.PERMISSION_GRANTED
+
+private fun scanPermission(): String =
+    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) Manifest.permission.BLUETOOTH_SCAN
+    else Manifest.permission.ACCESS_FINE_LOCATION
+
+private fun scanGranted(context: Context): Boolean =
+    ContextCompat.checkSelfPermission(context, scanPermission()) == PackageManager.PERMISSION_GRANTED
 
 @Composable
 fun ConnectionScreen(vm: ObdViewModel, modifier: Modifier = Modifier) {
@@ -73,6 +87,69 @@ fun ConnectionScreen(vm: ObdViewModel, modifier: Modifier = Modifier) {
     val permissionLauncher = rememberLauncherForActivityResult(ActivityResultContracts.RequestPermission()) { ok ->
         granted = ok
         if (!ok) error = "Sans autorisation Bluetooth, la liste des appareils reste inaccessible."
+    }
+
+    var scanAllowed by remember { mutableStateOf(scanGranted(context)) }
+    var scanning by remember { mutableStateOf(false) }
+    var found by remember { mutableStateOf<List<BluetoothDevice>>(emptyList()) }
+    var wantsScan by remember { mutableStateOf(false) }
+
+    val scanLauncher = rememberLauncherForActivityResult(ActivityResultContracts.RequestPermission()) { ok ->
+        scanAllowed = ok
+        if (!ok) {
+            wantsScan = false
+            error = "Sans autorisation de recherche, les nouveaux dongles ne peuvent pas être détectés."
+        }
+    }
+
+    val receiver = remember {
+        object : BroadcastReceiver() {
+            override fun onReceive(receiverContext: Context, intent: Intent) {
+                when (intent.action) {
+                    BluetoothDevice.ACTION_FOUND -> {
+                        val device = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+                            intent.getParcelableExtra(BluetoothDevice.EXTRA_DEVICE, BluetoothDevice::class.java)
+                        } else {
+                            @Suppress("DEPRECATION")
+                            intent.getParcelableExtra(BluetoothDevice.EXTRA_DEVICE)
+                        }
+                        if (device != null && device.address != adapter?.address) {
+                            found = (found + device).distinctBy { it.address }
+                        }
+                    }
+                    BluetoothAdapter.ACTION_DISCOVERY_FINISHED -> scanning = false
+                }
+            }
+        }
+    }
+
+    DisposableEffect(Unit) {
+        val filter = IntentFilter().apply {
+            addAction(BluetoothDevice.ACTION_FOUND)
+            addAction(BluetoothAdapter.ACTION_DISCOVERY_FINISHED)
+        }
+        runCatching {
+            ContextCompat.registerReceiver(context, receiver, filter, ContextCompat.RECEIVER_NOT_EXPORTED)
+        }
+        onDispose {
+            runCatching { context.unregisterReceiver(receiver) }
+            runCatching { adapter?.cancelDiscovery() }
+            scanning = false
+        }
+    }
+
+    fun startScan() {
+        val bluetooth = adapter ?: return
+        found = emptyList()
+        scanning = runCatching { bluetooth.startDiscovery() }.getOrDefault(false)
+        if (!scanning) error = "La recherche Bluetooth n'a pas pu démarrer."
+    }
+
+    LaunchedEffect(scanAllowed, wantsScan) {
+        if (wantsScan && scanAllowed) {
+            wantsScan = false
+            startScan()
+        }
     }
 
     LaunchedEffect(granted, refresh) {
@@ -125,17 +202,56 @@ fun ConnectionScreen(vm: ObdViewModel, modifier: Modifier = Modifier) {
         } else {
             SectionTitle("Appareils associés")
             if (devices.isEmpty()) {
-                EmptyHint("Aucun appareil associé. Associez d'abord l'ELM327 dans les réglages Bluetooth du téléphone (code PIN souvent 1234 ou 0000).")
+                EmptyHint("Aucun appareil associé. Utilisez « Rechercher » ci-dessous ou associez l'ELM327 dans les réglages Bluetooth (PIN souvent 1234 ou 0000).")
             } else {
                 devices.forEach { device ->
-                    DeviceRow(device) { vm.connectBluetooth(device) }
+                    DeviceRow(device) {
+                        runCatching { adapter?.cancelDiscovery() }
+                        scanning = false
+                        vm.connectBluetooth(device)
+                    }
                 }
             }
             Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                if (scanning) {
+                    OutlinedButton(onClick = {
+                        runCatching { adapter?.cancelDiscovery() }
+                        scanning = false
+                    }) { Text("Arrêter la recherche") }
+                } else {
+                    Button(onClick = {
+                        if (scanAllowed) {
+                            startScan()
+                        } else {
+                            wantsScan = true
+                            scanLauncher.launch(scanPermission())
+                        }
+                    }) { Text("Rechercher") }
+                }
                 OutlinedButton(onClick = { refresh++ }) { Text("Actualiser") }
+            }
+            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                 OutlinedButton(onClick = {
                     context.startActivity(Intent(Settings.ACTION_BLUETOOTH_SETTINGS))
                 }) { Text("Réglages Bluetooth") }
+                if (scanning) {
+                    Text(
+                        "Recherche en cours…",
+                        style = MaterialTheme.typography.labelSmall,
+                        color = MaterialTheme.colorScheme.primary,
+                        modifier = Modifier.padding(top = 14.dp),
+                    )
+                }
+            }
+            if (found.isNotEmpty()) {
+                SectionTitle("Appareils détectés")
+                found.forEach { device ->
+                    DeviceRow(device) {
+                        runCatching { adapter?.cancelDiscovery() }
+                        scanning = false
+                        vm.connectBluetooth(device)
+                    }
+                }
             }
         }
 
@@ -154,9 +270,14 @@ fun ConnectionScreen(vm: ObdViewModel, modifier: Modifier = Modifier) {
                 Text(
                     "1. Brancher l'ELM327 sur la prise OBD-II (sous le volant, côté conducteur).\n" +
                         "2. Mettre le contact ; le moteur peut rester éteint pour lire les codes.\n" +
-                        "3. Associer le dongle dans les réglages Bluetooth (PIN 1234 ou 0000).\n" +
-                        "4. Revenir ici et toucher le nom du dongle.",
+                        "3. Appuyer sur « Rechercher » ci-dessus, ou associer le dongle dans les réglages Bluetooth (PIN 1234 ou 0000).\n" +
+                        "4. Toucher le nom du dongle.",
                     style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+                Text(
+                    "Sur Android 11 et antérieur, la recherche Bluetooth exige aussi la localisation activée. Sur Android 12+, l'autorisation « Appareils à proximité » suffit.",
+                    style = MaterialTheme.typography.labelSmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                 )
                 Text(
@@ -300,8 +421,16 @@ private fun StatColumn(label: String, value: String) {
 @Composable
 fun FuelScreen(vm: ObdViewModel, modifier: Modifier = Modifier) {
     val fuel by vm.fuel.collectAsState()
+    val fills by vm.fills.collectAsState()
+    val car by vm.activeCar.collectAsState()
     val connection by vm.connection.collectAsState()
     val connected = connection.status == ConnStatus.CONNECTED || connection.status == ConnStatus.SIMULATOR
+    var addingFill by remember { mutableStateOf(false) }
+
+    LaunchedEffect(car?.id) { vm.loadFills(car?.id) }
+
+    val ordered = fills.sortedBy { it.odometerKm }
+    val fullAverage = TripMath.averageFullToFull(ordered)
 
     Column(
         modifier
@@ -331,25 +460,134 @@ fun FuelScreen(vm: ObdViewModel, modifier: Modifier = Modifier) {
         Button(onClick = vm::resetTrip, modifier = Modifier.fillMaxWidth()) {
             Text("Remettre les statistiques à zéro")
         }
+
+        Card(colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface)) {
+            Column(Modifier.padding(14.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+                    Column(Modifier.weight(1f)) {
+                        Text("Plein à plein", style = MaterialTheme.typography.titleSmall, fontWeight = FontWeight.SemiBold)
+                        Text(
+                            "Consommation réelle entre deux pleins",
+                            style = MaterialTheme.typography.labelSmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        )
+                    }
+                    TextButton(onClick = { addingFill = true }, enabled = car != null) { Text("＋ Plein") }
+                }
+                if (fullAverage != null) {
+                    StatColumn("Moyenne sur ${ordered.size} pleins", "${formatValue(fullAverage, 1)} L/100")
+                } else {
+                    Text(
+                        "Ajoutez au moins deux pleins avec le kilométrage compteur pour obtenir une consommation réelle, y compris sur diesel.",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                }
+                ordered.zipWithNext().takeLast(6).reversed().forEach { (previous, current) ->
+                    val consumption = TripMath.fullToFullL100(previous, current)
+                    Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+                        Column(Modifier.weight(1f)) {
+                            Text("${formatDate(current.at)} · ${current.odometerKm} km", style = MaterialTheme.typography.bodySmall)
+                            Text(
+                                "${formatValue(current.liters, 2)} L depuis ${previous.odometerKm} km",
+                                style = MaterialTheme.typography.labelSmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            )
+                        }
+                        Text(
+                            consumption?.let { "${formatValue(it, 1)} L/100" } ?: "—",
+                            style = MaterialTheme.typography.titleSmall,
+                        )
+                    }
+                }
+            }
+        }
+
         Card(colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface)) {
             Column(Modifier.padding(14.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
                 Text("Calcul", style = MaterialTheme.typography.titleSmall, fontWeight = FontWeight.SemiBold)
                 Text(
-                    "La consommation est déduite du débit d'air (MAF) et d'un rapport stœchiométrique essence de 14,7:1 (masse volumique 745 g/L) sur les moteurs essence. Sur diesel, elle n'est calculée que si le calculateur expose le PID 015E ; sinon elle reste vide plutôt que fausse.\n\nLa vitesse provient du PID 010D : sur certains véhicules, elle n'est pas disponible au ralenti. Les résultats sont indicatifs et ne remplacent pas un calcul de plein à plein.",
+                    "La consommation instantanée est déduite du débit d'air (MAF) sur les moteurs essence. Sur diesel, elle n'est calculée que si le calculateur expose le PID 015E ; sinon elle reste vide plutôt que fausse. Le calcul plein à plein, lui, fonctionne sur tous les moteurs.\n\nLa vitesse provient du PID 010D : sur certains véhicules, elle n'est pas disponible au ralenti. Les résultats instantanés restent indicatifs ; le plein à plein est la référence.",
                     style = MaterialTheme.typography.bodySmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                 )
             }
         }
     }
+
+    if (addingFill) {
+        var liters by remember { mutableStateOf("") }
+        var odometer by remember { mutableStateOf("") }
+        AlertDialog(
+            onDismissRequest = { addingFill = false },
+            title = { Text("Ajouter un plein") },
+            text = {
+                Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                    OutlinedTextField(
+                        value = odometer,
+                        onValueChange = { odometer = it },
+                        label = { Text("Kilométrage compteur") },
+                        singleLine = true,
+                    )
+                    OutlinedTextField(
+                        value = liters,
+                        onValueChange = { liters = it },
+                        label = { Text("Litres ajoutés") },
+                        singleLine = true,
+                    )
+                    Text(
+                        "Le kilométrage doit être supérieur au dernier plein enregistré.",
+                        style = MaterialTheme.typography.labelSmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                }
+            },
+            confirmButton = {
+                TextButton(
+                    onClick = {
+                        val km = odometer.toIntOrNull()
+                        val amount = liters.replace(',', '.').toDoubleOrNull()
+                        if (km != null && amount != null) {
+                            vm.addFill(amount, km)
+                            addingFill = false
+                        }
+                    },
+                    enabled = odometer.toIntOrNull() != null &&
+                        liters.replace(',', '.').toDoubleOrNull() != null,
+                ) { Text("Enregistrer") }
+            },
+            dismissButton = { TextButton(onClick = { addingFill = false }) { Text("Annuler") } },
+        )
+    }
 }
 
 @Composable
 fun JournalScreen(vm: ObdViewModel, modifier: Modifier = Modifier) {
     val car by vm.activeCar.collectAsState()
+    val journal by vm.journal.collectAsState()
     var addingNote by remember { mutableStateOf(false) }
+    var query by remember { mutableStateOf("") }
+    var kind by remember { mutableStateOf<String?>(null) }
 
-    LaunchedEffect(car?.id) { vm.loadJournal(car?.id) }
+    LaunchedEffect(car?.id, query, kind) {
+        delay(250)
+        vm.loadJournal(
+            carId = car?.id,
+            reset = true,
+            query = query,
+            kinds = kind?.let { setOf(it) } ?: emptySet(),
+        )
+    }
+
+    val kinds = listOf(
+        null to "Tous",
+        "note" to "📝 Notes",
+        "codes" to "🛠️ Codes",
+        "connexion" to "🔌 Connexions",
+        "mesure" to "🏁 Mesures",
+        "plein" to "⛽ Pleins",
+        "rapport" to "📄 Rapports",
+    )
 
     LazyColumn(
         modifier
@@ -372,8 +610,14 @@ fun JournalScreen(vm: ObdViewModel, modifier: Modifier = Modifier) {
                     ) {
                         Column(Modifier.weight(1f)) {
                             Text(current.title, style = MaterialTheme.typography.titleMedium)
+                            val unfiltered = query.isBlank() && kind == null
+                            val total = if (unfiltered && journal.total == 0) current.logCount else journal.total
                             Text(
-                                "${current.logCount} action(s) enregistrée(s)",
+                                if (unfiltered) {
+                                    "$total action(s) enregistrée(s)"
+                                } else {
+                                    "$total résultat(s) sur ${current.logCount}"
+                                },
                                 style = MaterialTheme.typography.labelSmall,
                                 color = MaterialTheme.colorScheme.onSurfaceVariant,
                             )
@@ -383,16 +627,50 @@ fun JournalScreen(vm: ObdViewModel, modifier: Modifier = Modifier) {
                 }
             }
         }
-        val entries = car?.log?.asReversed().orEmpty()
-        if (entries.isEmpty() && car != null) {
+        item {
+            OutlinedTextField(
+                value = query,
+                onValueChange = { query = it },
+                label = { Text("Rechercher dans le journal") },
+                singleLine = true,
+                modifier = Modifier.fillMaxWidth(),
+            )
+        }
+        item {
+            LazyRow(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                items(kinds) { (value, label) ->
+                    FilterChip(
+                        selected = kind == value,
+                        onClick = { kind = value },
+                        label = { Text(label, style = MaterialTheme.typography.labelSmall) },
+                    )
+                }
+            }
+        }
+        if (journal.entries.isEmpty()) {
             item {
                 EmptyHint(
-                    if ((car?.logCount ?: 0) > 0) "Chargement du journal…"
-                    else "Aucune action enregistrée. Connexions, lectures de codes, effacements, mesures et notes apparaîtront ici.",
+                    when {
+                        journal.loading -> "Chargement du journal…"
+                        car == null -> "Aucun véhicule actif."
+                        query.isNotBlank() || kind != null -> "Aucune entrée ne correspond à cette recherche."
+                        else -> "Aucune action enregistrée. Connexions, lectures de codes, effacements, mesures et notes apparaîtront ici."
+                    },
                 )
             }
         }
-        items(entries) { entry -> LogRow(entry) }
+        items(journal.entries) { entry -> LogRow(entry) }
+        if (journal.hasMore) {
+            item {
+                OutlinedButton(
+                    onClick = { vm.loadMoreJournal(query, kind?.let { setOf(it) } ?: emptySet()) },
+                    modifier = Modifier.fillMaxWidth(),
+                    enabled = !journal.loading,
+                ) {
+                    Text(if (journal.loading) "Chargement…" else "Charger plus")
+                }
+            }
+        }
         item {
             Text(
                 "Le journal est conservé par véhicule, sur le téléphone, et inclus dans la sauvegarde.",
@@ -420,6 +698,12 @@ fun JournalScreen(vm: ObdViewModel, modifier: Modifier = Modifier) {
                     onClick = {
                         vm.addNote(text)
                         addingNote = false
+                        vm.loadJournal(
+                            carId = car?.id,
+                            reset = true,
+                            query = query,
+                            kinds = kind?.let { setOf(it) } ?: emptySet(),
+                        )
                     },
                     enabled = text.isNotBlank(),
                 ) { Text("Enregistrer") }
@@ -503,7 +787,7 @@ fun BackupScreen(vm: ObdViewModel, modifier: Modifier = Modifier) {
             Column(Modifier.padding(14.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
                 Text("Contenu et précautions", style = MaterialTheme.typography.titleSmall, fontWeight = FontWeight.SemiBold)
                 Text(
-                    "L'archive ZIP contient les fiches véhicules, leurs photos, le journal des actions et les réglages. Elle est écrite à l'emplacement que vous choisissez (Stockage, Drive, clé USB…).\n\nLa restauration remplace les véhicules, le journal et les réglages actuels, puis réinstalle les photos. Enregistrez la sauvegarde hors du téléphone : elle survit à une désinstallation.",
+                    "L'archive ZIP contient les fiches véhicules, leurs photos, le journal des actions, les pleins et les réglages. Elle est écrite à l'emplacement que vous choisissez (Stockage, Drive, clé USB…).\n\nLa restauration remplace les véhicules, le journal, les pleins et les réglages actuels, puis réinstalle les photos. Enregistrez la sauvegarde hors du téléphone : elle survit à une désinstallation.",
                     style = MaterialTheme.typography.bodySmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                 )

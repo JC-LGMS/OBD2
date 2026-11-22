@@ -28,4 +28,21 @@ object TripMath {
         val newLiters = liters + (lph ?: 0.0) / 3600.0 * dtSeconds
         return newDistance to newLiters
     }
+
+    /** Consommation entre deux pleins : litres du plein courant / distance depuis le précédent. */
+    fun fullToFullL100(previous: FuelFill, current: FuelFill): Double? {
+        val km = current.odometerKm - previous.odometerKm
+        if (km <= 0 || current.liters <= 0.0) return null
+        return current.liters / km * 100.0
+    }
+
+    /** Moyenne sur tous les pleins : litres ajoutés après le premier / distance totale. */
+    fun averageFullToFull(fills: List<FuelFill>): Double? {
+        if (fills.size < 2) return null
+        val ordered = fills.sortedBy { it.odometerKm }
+        val km = ordered.last().odometerKm - ordered.first().odometerKm
+        val liters = ordered.drop(1).sumOf { it.liters }
+        if (km <= 0 || liters <= 0.0) return null
+        return liters / km * 100.0
+    }
 }

@@ -163,7 +163,7 @@ fun ObdApp(vm: ObdViewModel) {
             Routes.BACKUP -> BackupScreen(vm, modifier)
             Routes.CHANGELOG -> ChangelogScreen(modifier)
             else -> when (tab) {
-                0 -> DashboardScreen(vm, modifier, onOpenCodes = { tab = 2 }, onOpenExtra = { extra = it })
+                0 -> DashboardScreen(vm, modifier, onOpenCodes = { tab = 2 }, onOpenExtra = { extra = it }, onOpenGarage = { tab = 4 })
                 1 -> SensorsScreen(vm, modifier)
                 2 -> DtcScreen(vm, modifier)
                 3 -> ChartsScreen(vm, modifier)

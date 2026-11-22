@@ -43,9 +43,11 @@ fun DashboardScreen(
     modifier: Modifier = Modifier,
     onOpenCodes: () -> Unit,
     onOpenExtra: (String) -> Unit,
+    onOpenGarage: () -> Unit,
 ) {
     val live by vm.live.collectAsState()
     val settings by vm.settings.collectAsState()
+    val cars by vm.cars.collectAsState()
     val car by vm.activeCar.collectAsState()
     val fuel by vm.fuel.collectAsState()
     val accel by vm.accel.collectAsState()
@@ -53,6 +55,7 @@ fun DashboardScreen(
 
     var info by remember { mutableStateOf<Pid?>(null) }
     var customize by remember { mutableStateOf(false) }
+    var choosingCar by remember { mutableStateOf(false) }
     val sensors = settings.dashboard.mapNotNull { Pids.byId(it) }
 
     LazyColumn(
@@ -62,7 +65,7 @@ fun DashboardScreen(
         contentPadding = PaddingValues(vertical = 12.dp),
         verticalArrangement = Arrangement.spacedBy(10.dp),
     ) {
-        item { CarHeader(car) }
+        item { CarHeader(car) { choosingCar = true } }
         item {
             Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
                 MiniStat(
@@ -165,11 +168,64 @@ fun DashboardScreen(
             confirmButton = { TextButton(onClick = { customize = false }) { Text("Terminé") } },
         )
     }
+
+    if (choosingCar) {
+        AlertDialog(
+            onDismissRequest = { choosingCar = false },
+            title = { Text("Véhicules") },
+            text = {
+                if (cars.isEmpty()) {
+                    Text("Aucun véhicule. Créez-en un dans l'onglet Véhicule.")
+                } else {
+                    LazyColumn(Modifier.heightIn(max = 400.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                        items(cars, key = { it.id }) { item ->
+                            Card(
+                                onClick = {
+                                    vm.selectCar(item.id)
+                                    choosingCar = false
+                                },
+                                colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceVariant),
+                            ) {
+                                Row(
+                                    Modifier
+                                        .fillMaxWidth()
+                                        .padding(12.dp),
+                                    verticalAlignment = Alignment.CenterVertically,
+                                ) {
+                                    Text(if (item.id == car?.id) "✅" else "🚘", fontSize = 18.sp)
+                                    Spacer(Modifier.width(10.dp))
+                                    Column(Modifier.weight(1f)) {
+                                        Text(item.title, style = MaterialTheme.typography.titleSmall)
+                                        Text(
+                                            item.plate.ifBlank { item.subtitle },
+                                            style = MaterialTheme.typography.labelSmall,
+                                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                        )
+                                    }
+                                    TextButton(
+                                        onClick = {
+                                            vm.selectCar(item.id)
+                                            choosingCar = false
+                                            onOpenGarage()
+                                        },
+                                    ) { Text("Détails") }
+                                }
+                            }
+                        }
+                    }
+                }
+            },
+            confirmButton = { TextButton(onClick = { choosingCar = false }) { Text("Fermer") } },
+        )
+    }
 }
 
 @Composable
-private fun CarHeader(car: Car?) {
-    Card(colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface)) {
+private fun CarHeader(car: Car?, onClick: () -> Unit) {
+    Card(
+        onClick = onClick,
+        colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface),
+    ) {
         Row(
             Modifier
                 .fillMaxWidth()
@@ -178,7 +234,7 @@ private fun CarHeader(car: Car?) {
         ) {
             Text("🚗", fontSize = 28.sp)
             Spacer(Modifier.width(12.dp))
-            Column {
+            Column(Modifier.weight(1f)) {
                 Text(car?.title ?: "Aucun véhicule actif", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.SemiBold)
                 Text(
                     car?.let {

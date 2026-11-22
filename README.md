@@ -15,8 +15,10 @@ véhicules et sauvegarde.
   ou cadran.
 - Courbes temporelles, mesure 0–100 km/h et accélération en g, consommation instantanée/moyenne.
 - Profils véhicules : marque, modèle, année, moteur, VIN, plaque, plusieurs photos, journal
-  complet des actions (conservé sans limite, fichier séparé).
-- Thème sombre ou clair, sauvegarde/restauration ZIP (véhicules, photos, journal, réglages).
+  complet des actions (recherche, filtres, chargement par pages).
+- Consommation réelle plein à plein, y compris sur diesel ; rapport de codes partageable.
+- Thème sombre, clair ou système ; recherche Bluetooth intégrée pour les dongles non associés.
+- Sauvegarde/restauration ZIP (véhicules, photos, journal, pleins, réglages).
 - Simulateur ELM327 intégré pour tester sans dongle ni véhicule.
 
 ## Compilation

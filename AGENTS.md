@@ -5,7 +5,7 @@ direct, tableau de bord personnalisable, courbes, autodiagnostic UCE, accéléra
 profils véhicules (photos + journal) et sauvegarde ZIP. Kotlin + Jetpack Compose, Material3.
 
 - package / applicationId : `com.obd2.jeancyril` ; activité launcher `com.obd2.jeancyril.MainActivity`
-- compileSdk / targetSdk 37, minSdk 26, version 1.1
+- compileSdk / targetSdk 37, minSdk 26, version 1.2
 - Gradle 9.9.1, AGP 9.5.1, **Kotlin 2.2.10 fourni par AGP** (built-in) : ne pas appliquer
   `org.jetbrains.kotlin.android`, il entrerait en conflit. JDK 17.
 - build-tools 36.0.0, Compose BOM 2026.09.00, Material3. Aucune autre dépendance runtime.
@@ -31,8 +31,8 @@ SDK : `%LOCALAPPDATA%\Android\Sdk` (plateforme `android-37.0`, build-tools 36.0.
 ```powershell
 & $g :app:compileDebugKotlin   --console=plain
 & $g :app:assembleDebug        --console=plain
-& $g :app:testDebugUnitTest    --console=plain   # 18 tests : protocole ELM, PID, DTC, conso, styles
-& $g :app:connectedDebugAndroidTest --console=plain  # 4 tests : persistance, quarantaine, backup, migration
+& $g :app:testDebugUnitTest    --console=plain   # 19 tests : protocole ELM, PID, DTC, conso, pleins, styles
+& $g :app:connectedDebugAndroidTest --console=plain  # 5 tests : persistance, quarantaine, backup, migration, pagination
 & $g :app:assembleRelease      --console=plain
 & $adb install -r app\build\outputs\apk\debug\app-debug.apk
 & $adb shell am force-stop com.obd2.jeancyril
@@ -73,11 +73,11 @@ bounds sont fiables.
   MAF toujours interrogées, historique 300 points/PID, consommation, chrono 0–100, DTC, VIN,
   CRUD véhicules, thème, styles de tuiles, backup.
 - `data/GarageStore.kt` : persistance JSON + photos dans `filesDir/garage/`. Le journal est
-  **append-only** dans `logs/<carId>.jsonl` (aucune réécriture, historique complet conservé) ;
-  `cars.json` ne garde que `logCount`, et les anciens journaux inclus dans `cars.json` sont migrés
-  au chargement. Le journal n'est chargé qu'à l'ouverture de l'écran Journal. Sauvegarde ZIP
-  (`cars.json`, `settings.json`, `images/`, `logs/`, maximum 1 Go), restauration validée avant
-  remplacement.
+  **append-only** dans `logs/<carId>.jsonl` (aucune réécriture, historique complet conservé,
+  chargement par pages de 100 avec recherche/filtre). Les pleins plein-à-plein sont dans
+  `fills/<carId>.jsonl`. `cars.json` ne garde que `logCount`, et les anciens journaux inclus dans
+  `cars.json` sont migrés au chargement. Sauvegarde ZIP (`cars.json`, `settings.json`,
+  `images/`, `logs/`, `fills/`, maximum 1 Go), restauration validée avant remplacement.
 - `ui/` : `App.kt` (Scaffold, 5 onglets + sous-pages avec `BackHandler`, en-tête icône/version et
   statut sous la prise), `Changelog.kt` + `ChangelogScreen`, `DashboardScreen`, `SensorsScreen`,
   `DtcScreen`, `ChartsScreen`, `GarageScreen` (plaque, photos, journal, thème), `ToolsScreens`

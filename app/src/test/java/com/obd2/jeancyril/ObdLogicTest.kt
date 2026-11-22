@@ -1,5 +1,6 @@
 package com.obd2.jeancyril
 
+import com.obd2.jeancyril.data.FuelFill
 import com.obd2.jeancyril.data.SensorStyles
 import com.obd2.jeancyril.data.TripMath
 import com.obd2.jeancyril.obd.Dtcs
@@ -145,5 +146,17 @@ class ObdLogicTest {
         assertTrue(TripMath.looksDiesel("BlueHDi 130"))
         assertFalse(TripMath.looksDiesel("1.2 PureTech 82"))
         assertFalse(TripMath.looksDiesel("1.4 TSI"))
+    }
+
+    @Test
+    fun fullToFullConsumption() {
+        val first = FuelFill(at = 1, odometerKm = 10_000, liters = 40.0)
+        val second = FuelFill(at = 2, odometerKm = 10_600, liters = 42.0)
+        val third = FuelFill(at = 3, odometerKm = 11_200, liters = 36.0)
+        assertEquals(7.0, TripMath.fullToFullL100(first, second)!!, 1e-6)
+        assertEquals(6.0, TripMath.fullToFullL100(second, third)!!, 1e-6)
+        assertEquals(6.5, TripMath.averageFullToFull(listOf(first, second, third))!!, 1e-6)
+        assertNull(TripMath.averageFullToFull(listOf(first)))
+        assertNull(TripMath.fullToFullL100(second, first))
     }
 }

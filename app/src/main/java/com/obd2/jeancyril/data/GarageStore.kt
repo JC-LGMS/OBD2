@@ -19,6 +19,7 @@ class GarageStore(private val context: Context, rootOverride: File? = null) {
     private val root = (rootOverride ?: File(context.filesDir, "garage")).apply { mkdirs() }
     private val imagesDir = File(root, "images").apply { mkdirs() }
     private val logsDir = File(root, "logs").apply { mkdirs() }
+    private val fillsDir = File(root, "fills").apply { mkdirs() }
     private val carsFile = File(root, "cars.json")
     private val settingsFile = File(root, "settings.json")
 
@@ -37,14 +38,14 @@ class GarageStore(private val context: Context, rootOverride: File? = null) {
             emptyList()
         } else {
             val array = JSONArray(carsFile.readText())
-            val cars = (0 until array.length()).map { carFromJson(array.getJSONObject(it)) }
+            val parsed = (0 until array.length()).map { carFromJson(array.getJSONObject(it)) }
             // Migration des anciennes versions : le journal était stocké dans cars.json.
-            cars.forEach { car ->
-                if (car.log.isNotEmpty() && !hasLog(car.id)) {
-                    appendEntries(car.id, car.log)
+            parsed.forEach { item ->
+                if (item.legacyLog.isNotEmpty() && !hasLog(item.car.id)) {
+                    appendEntries(item.car.id, item.legacyLog)
                 }
             }
-            cars.map { it.copy(log = emptyList()) }
+            parsed.map { it.car }
         }
     } catch (e: Exception) {
         quarantine(carsFile)
@@ -93,7 +94,9 @@ class GarageStore(private val context: Context, rootOverride: File? = null) {
             dashboard = dashboard,
             activeCar = json.optString("activeCar").takeIf { it.isNotBlank() },
             overrides = overrides,
-            lightTheme = json.optBoolean("lightTheme", false),
+            themeMode = json.optString("themeMode").ifBlank {
+                if (json.optBoolean("lightTheme", false)) "light" else "dark"
+            },
         )
     }
 
@@ -113,7 +116,7 @@ class GarageStore(private val context: Context, rootOverride: File? = null) {
             overrides.put(id, obj)
         }
         json.put("overrides", overrides)
-        json.put("lightTheme", settings.lightTheme)
+        json.put("themeMode", settings.themeMode)
         writeAtomically(settingsFile, json.toString())
     }
 
@@ -178,6 +181,92 @@ class GarageStore(private val context: Context, rootOverride: File? = null) {
         logFile(carId).delete()
     }
 
+    /**
+     * Une page du journal, la plus récente d'abord côté UI. `offset` 0 = dernières entrées.
+     * Le fichier est parcouru en flux : seules les `offset + limit` dernières entrées filtrées
+     * sont gardées en mémoire.
+     */
+    @Synchronized
+    fun loadLogPage(
+        carId: String,
+        offset: Int,
+        limit: Int,
+        query: String = "",
+        kinds: Set<String> = emptySet(),
+    ): JournalPage {
+        val file = logFile(carId)
+        if (!file.exists()) return JournalPage(emptyList(), 0)
+        val needle = query.trim()
+        val buffer = java.util.ArrayDeque<LogEntry>()
+        var total = 0
+        runCatching {
+            file.bufferedReader(Charsets.UTF_8).useLines { lines ->
+                lines.forEach { line ->
+                    val entry = runCatching { entryFromJson(JSONObject(line)) }.getOrNull()
+                        ?: return@forEach
+                    if (needle.isNotEmpty() &&
+                        !entry.text.contains(needle, ignoreCase = true) &&
+                        !entry.kind.contains(needle, ignoreCase = true)
+                    ) {
+                        return@forEach
+                    }
+                    if (kinds.isNotEmpty() && entry.kind !in kinds) return@forEach
+                    total++
+                    buffer.addLast(entry)
+                    if (buffer.size > offset + limit) buffer.removeFirst()
+                }
+            }
+        }
+        if (offset >= total) return JournalPage(emptyList(), total)
+        val list = buffer.toList()
+        val end = list.size - offset
+        if (end <= 0) return JournalPage(emptyList(), total)
+        val start = maxOf(0, end - limit)
+        return JournalPage(list.subList(start, end), total)
+    }
+
+    fun fillFile(carId: String): File = File(fillsDir, "${File(carId).name}.jsonl")
+
+    @Synchronized
+    fun appendFill(carId: String, fill: FuelFill) {
+        fillsDir.mkdirs()
+        java.io.FileOutputStream(fillFile(carId), true).bufferedWriter(Charsets.UTF_8).use { writer ->
+            writer.write(
+                JSONObject().apply {
+                    put("at", fill.at)
+                    put("odometerKm", fill.odometerKm)
+                    put("liters", fill.liters)
+                }.toString(),
+            )
+            writer.newLine()
+        }
+    }
+
+    @Synchronized
+    fun loadFills(carId: String): List<FuelFill> {
+        val file = fillFile(carId)
+        if (!file.exists()) return emptyList()
+        return runCatching {
+            file.bufferedReader(Charsets.UTF_8).useLines { lines ->
+                lines.mapNotNull { line ->
+                    runCatching {
+                        val json = JSONObject(line)
+                        FuelFill(
+                            at = json.optLong("at", System.currentTimeMillis()),
+                            odometerKm = json.optInt("odometerKm", 0),
+                            liters = json.optDouble("liters", 0.0),
+                        )
+                    }.getOrNull()
+                }.toList()
+            }
+        }.getOrDefault(emptyList())
+    }
+
+    @Synchronized
+    fun deleteFills(carId: String) {
+        fillFile(carId).delete()
+    }
+
     private fun entryToJson(entry: LogEntry): JSONObject = JSONObject().apply {
         put("at", entry.at)
         put("kind", entry.kind)
@@ -191,7 +280,9 @@ class GarageStore(private val context: Context, rootOverride: File? = null) {
     )
 
     fun exportBackup(uri: Uri) {
-        val files = (imagesDir.listFiles()?.toList().orEmpty() + logsDir.listFiles()?.toList().orEmpty())
+        val files = (imagesDir.listFiles()?.toList().orEmpty() +
+            logsDir.listFiles()?.toList().orEmpty() +
+            fillsDir.listFiles()?.toList().orEmpty())
         val totalBytes = carsFile.length() + settingsFile.length() + files.sumOf { it.length() }
         if (totalBytes > MAX_BACKUP_BYTES) {
             throw IOException("Sauvegarde trop volumineuse (maximum 1 Go)")
@@ -216,6 +307,11 @@ class GarageStore(private val context: Context, rootOverride: File? = null) {
                     file.inputStream().use { it.copyTo(zip) }
                     zip.closeEntry()
                 }
+                fillsDir.listFiles()?.forEach { file ->
+                    zip.putNextEntry(ZipEntry("fills/${file.name}"))
+                    file.inputStream().use { it.copyTo(zip) }
+                    zip.closeEntry()
+                }
             }
         }
     }
@@ -225,6 +321,7 @@ class GarageStore(private val context: Context, rootOverride: File? = null) {
         val temp = File(context.cacheDir, "restore-${System.nanoTime()}").apply { mkdirs() }
         val tempImages = File(temp, "images").apply { mkdirs() }
         val tempLogs = File(temp, "logs").apply { mkdirs() }
+        val tempFills = File(temp, "fills").apply { mkdirs() }
         var carsBytes: ByteArray? = null
         var settingsBytes: ByteArray? = null
         var total = 0L
@@ -260,6 +357,13 @@ class GarageStore(private val context: Context, rootOverride: File? = null) {
                                     ?: throw IOException("Sauvegarde trop volumineuse (maximum 1 Go)")
                                 total += written
                             }
+                            name.startsWith("fills/") && !name.endsWith("/") -> {
+                                val target = File(tempFills, File(name).name)
+                                val remaining = MAX_BACKUP_BYTES - total
+                                val written = copyCapped(zip, target, remaining)
+                                    ?: throw IOException("Sauvegarde trop volumineuse (maximum 1 Go)")
+                                total += written
+                            }
                         }
                         if (total > MAX_BACKUP_BYTES) throw IOException("Sauvegarde trop volumineuse (maximum 1 Go)")
                     }
@@ -286,12 +390,17 @@ class GarageStore(private val context: Context, rootOverride: File? = null) {
                 val destination = File(logsDir, file.name)
                 if (!file.renameTo(destination)) file.copyTo(destination, overwrite = true)
             }
-            val cars = parsedCars.map { car ->
-                if (car.log.isNotEmpty() && !hasLog(car.id)) {
-                    appendEntries(car.id, car.log)
-                    car.copy(logCount = maxOf(car.logCount, car.log.size), log = emptyList())
+            tempFills.listFiles()?.forEach { file ->
+                val destination = File(fillsDir, file.name)
+                if (!file.renameTo(destination)) file.copyTo(destination, overwrite = true)
+            }
+            val cars = parsedCars.map { item ->
+                val car = item.car
+                if (item.legacyLog.isNotEmpty() && !hasLog(car.id)) {
+                    appendEntries(car.id, item.legacyLog)
+                    car.copy(logCount = maxOf(car.logCount, item.legacyLog.size))
                 } else {
-                    car.copy(log = emptyList())
+                    car
                 }
             }
             saveCars(cars)
@@ -366,7 +475,7 @@ class GarageStore(private val context: Context, rootOverride: File? = null) {
         put("logCount", car.logCount)
     }
 
-    private fun carFromJson(json: JSONObject): Car {
+    private fun carFromJson(json: JSONObject): ParsedCar {
         val images = json.optJSONArray("images")?.let { array ->
             (0 until array.length()).map { array.getString(it) }
         } ?: emptyList()
@@ -381,7 +490,7 @@ class GarageStore(private val context: Context, rootOverride: File? = null) {
             }
         } ?: emptyList()
         val logCount = if (json.has("logCount")) json.optInt("logCount", log.size) else log.size
-        return Car(
+        val car = Car(
             id = json.optString("id").ifBlank { UUID.randomUUID().toString() },
             brand = json.optString("brand"),
             model = json.optString("model"),
@@ -391,7 +500,9 @@ class GarageStore(private val context: Context, rootOverride: File? = null) {
             plate = json.optString("plate"),
             images = images,
             logCount = logCount,
-            log = log,
         )
+        return ParsedCar(car, log)
     }
+
+    private data class ParsedCar(val car: Car, val legacyLog: List<LogEntry>)
 }

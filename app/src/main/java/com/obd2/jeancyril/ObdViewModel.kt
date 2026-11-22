@@ -11,8 +11,10 @@ import com.obd2.jeancyril.data.ConnStatus
 import com.obd2.jeancyril.data.ConnectionState
 import com.obd2.jeancyril.data.Dtc
 import com.obd2.jeancyril.data.DtcState
+import com.obd2.jeancyril.data.FuelFill
 import com.obd2.jeancyril.data.FuelState
 import com.obd2.jeancyril.data.GarageStore
+import com.obd2.jeancyril.data.JournalState
 import com.obd2.jeancyril.data.LiveState
 import com.obd2.jeancyril.data.LogEntry
 import com.obd2.jeancyril.data.MonitorStatus
@@ -71,6 +73,12 @@ class ObdViewModel(app: Application) : AndroidViewModel(app) {
     private val _fuel = MutableStateFlow(FuelState())
     val fuel: StateFlow<FuelState> = _fuel.asStateFlow()
 
+    private val _fills = MutableStateFlow<List<FuelFill>>(emptyList())
+    val fills: StateFlow<List<FuelFill>> = _fills.asStateFlow()
+
+    private val _journal = MutableStateFlow(JournalState())
+    val journal: StateFlow<JournalState> = _journal.asStateFlow()
+
     private val _accel = MutableStateFlow(AccelState())
     val accel: StateFlow<AccelState> = _accel.asStateFlow()
 
@@ -93,6 +101,8 @@ class ObdViewModel(app: Application) : AndroidViewModel(app) {
     private val carLock = Any()
     private val historyLock = Any()
     private val history = HashMap<String, java.util.ArrayDeque<Sample>>()
+    @Volatile
+    private var journalRequest = 0
 
     fun clearMessage() {
         _message.value = null
@@ -400,6 +410,7 @@ class ObdViewModel(app: Application) : AndroidViewModel(app) {
     fun clearCodes() {
         val session = elm ?: return noSession()
         viewModelScope.launch(Dispatchers.IO) {
+            buildReport()?.let { log("rapport", it) }
             runCatching { session.clearDtcs() }
                 .onSuccess { ok ->
                     if (ok) {
@@ -447,11 +458,9 @@ class ObdViewModel(app: Application) : AndroidViewModel(app) {
     // ------------------------------------------------------------------ véhicule
 
     fun selectCar(id: String) {
-        val previous = _settings.value.activeCar
-        if (previous != null && previous != id) {
-            updateCarMemory(previous) { it.copy(log = emptyList()) }
-        }
         updateSettings { it.copy(activeCar = id) }
+        _journal.value = JournalState()
+        _fills.value = emptyList()
     }
 
     fun addCar(brand: String, model: String, year: String, engine: String, vin: String, plate: String): String {
@@ -494,8 +503,11 @@ class ObdViewModel(app: Application) : AndroidViewModel(app) {
         }
         car.images.forEach { store.deleteImage(it) }
         store.deleteLog(id)
+        store.deleteFills(id)
         if (_settings.value.activeCar == id) {
             updateSettings { it.copy(activeCar = _cars.value.firstOrNull()?.id) }
+            _journal.value = JournalState()
+            _fills.value = emptyList()
         }
     }
 
@@ -534,26 +546,107 @@ class ObdViewModel(app: Application) : AndroidViewModel(app) {
         val id = _settings.value.activeCar ?: return
         val entry = LogEntry(kind = kind, text = text)
         store.appendLog(id, entry)
-        updateCar(id) { car ->
-            car.copy(log = car.log + entry, logCount = car.logCount + 1)
-        }
+        updateCar(id) { car -> car.copy(logCount = car.logCount + 1) }
     }
 
-    /** Charge le journal complet du véhicule à la demande (écran Journal). */
-    fun loadJournal(carId: String? = _settings.value.activeCar) {
-        if (carId == null) return
+    /**
+     * Charge une page du journal (100 entrées). `reset=true` repart des plus récentes.
+     * La recherche et les filtres s'appliquent à tout l'historique, pas seulement aux pages déjà vues.
+     */
+    fun loadJournal(
+        carId: String? = _settings.value.activeCar,
+        reset: Boolean = true,
+        query: String = "",
+        kinds: Set<String> = emptySet(),
+    ) {
+        if (carId == null) {
+            _journal.value = JournalState()
+            return
+        }
+        val request = ++journalRequest
         viewModelScope.launch(Dispatchers.IO) {
-            val entries = store.loadLog(carId)
-            updateCarMemory(carId) {
-                it.copy(log = entries, logCount = maxOf(it.logCount, entries.size))
-            }
+            _journal.update { it.copy(loading = true) }
+            val offset = if (reset) 0 else _journal.value.entries.size
+            runCatching { store.loadLogPage(carId, offset, 100, query, kinds) }
+                .onSuccess { page ->
+                    if (request != journalRequest) return@onSuccess
+                    val newEntries = page.entries.asReversed()
+                    _journal.update { old ->
+                        val entries = if (reset) newEntries else (old.entries + newEntries).distinct()
+                        JournalState(entries, page.total, entries.size < page.total, false)
+                    }
+                }
+                .onFailure {
+                    if (request != journalRequest) return@onFailure
+                    _journal.update { state -> state.copy(loading = false) }
+                    _message.value = it.message ?: "Lecture du journal impossible"
+                }
         }
     }
 
-    private fun updateCarMemory(id: String, transform: (Car) -> Car) {
-        synchronized(carLock) {
-            _cars.value = _cars.value.map { if (it.id == id) transform(it) else it }
+    fun loadMoreJournal(query: String = "", kinds: Set<String> = emptySet()) {
+        loadJournal(reset = false, query = query, kinds = kinds)
+    }
+
+    fun loadFills(carId: String? = _settings.value.activeCar) {
+        if (carId == null) {
+            _fills.value = emptyList()
+            return
         }
+        viewModelScope.launch(Dispatchers.IO) {
+            _fills.value = store.loadFills(carId).sortedBy { it.odometerKm }
+        }
+    }
+
+    fun addFill(liters: Double, odometerKm: Int) {
+        val id = _settings.value.activeCar ?: run {
+            _message.value = "Créez d'abord un véhicule"
+            return
+        }
+        if (liters <= 0.0 || odometerKm <= 0) {
+            _message.value = "Litres et kilométrage doivent être positifs"
+            return
+        }
+        viewModelScope.launch(Dispatchers.IO) {
+            val fills = store.loadFills(id).sortedBy { it.odometerKm }
+            val last = fills.lastOrNull()
+            if (last != null && odometerKm <= last.odometerKm) {
+                _message.value = "Le kilométrage doit dépasser ${last.odometerKm} km"
+                return@launch
+            }
+            store.appendFill(id, FuelFill(odometerKm = odometerKm, liters = liters))
+            _fills.value = store.loadFills(id).sortedBy { it.odometerKm }
+            log("plein", "Plein : %.2f L à %d km".format(liters, odometerKm))
+            _message.value = "Plein enregistré"
+        }
+    }
+
+    fun buildReport(): String? {
+        val car = activeCar.value ?: return null
+        val state = _dtcs.value
+        if (state.lastReadAt == 0L) return null
+        val date = java.text.SimpleDateFormat("dd/MM/yyyy HH:mm", java.util.Locale.FRANCE)
+            .format(java.util.Date(state.lastReadAt))
+        val text = StringBuilder()
+        text.appendLine("Rapport OBD2 — $date")
+        text.appendLine("Véhicule : ${car.title}")
+        if (car.plate.isNotBlank()) text.appendLine("Plaque : ${car.plate}")
+        if (car.vin.isNotBlank()) text.appendLine("VIN : ${car.vin}")
+        text.appendLine("Témoin moteur : ${if (_monitor.value.mil) "allumé" else "éteint"}")
+        text.appendLine("Codes signalés : ${_monitor.value.dtcCount}")
+        listOf("Mémorisé" to state.stored, "En attente" to state.pending, "Permanent" to state.permanent)
+            .forEach { (label, codes) ->
+                if (codes.isNotEmpty()) {
+                    text.appendLine()
+                    text.appendLine("$label (${codes.size}) :")
+                    codes.forEach { text.appendLine("- ${it.code} : ${it.description}") }
+                }
+            }
+        if (state.stored.isEmpty() && state.pending.isEmpty() && state.permanent.isEmpty()) {
+            text.appendLine()
+            text.appendLine("Aucun code défaut.")
+        }
+        return text.toString().trim()
     }
 
     private fun updateCar(id: String, transform: (Car) -> Car) {
@@ -590,8 +683,9 @@ class ObdViewModel(app: Application) : AndroidViewModel(app) {
         setSensorStyle(id, SensorStyles.next(current ?: SensorStyles.defaultFor(id)))
     }
 
-    fun setLightTheme(enabled: Boolean) {
-        updateSettings { it.copy(lightTheme = enabled) }
+    fun setThemeMode(mode: String) {
+        if (mode !in setOf("dark", "light", "system")) return
+        updateSettings { it.copy(themeMode = mode) }
     }
 
     private fun updateSettings(transform: (Settings) -> Settings) {
