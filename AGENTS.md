@@ -12,8 +12,10 @@ profils véhicules (photos + journal) et sauvegarde ZIP. Kotlin + Jetpack Compos
 
 ## Chaîne d'outils (spécifique à la machine)
 
-`gradle` **n'est pas dans le PATH**. Utiliser la distribution déjà téléchargée (le hachage du
-dossier peut changer : `Get-ChildItem ~\.gradle\wrapper\dists -Recurse -Filter gradle.bat`) :
+Le wrapper est maintenant versionné (`gradlew.bat`, `gradle/wrapper/`) et fonctionne hors-ligne
+avec la distribution 9.9.1 déjà en cache. Sinon, `gradle` **n'est pas dans le PATH** : utiliser la
+distribution téléchargée (le hachage du dossier peut changer :
+`Get-ChildItem ~\.gradle\wrapper\dists -Recurse -Filter gradle.bat`) :
 
 ```powershell
 $env:JAVA_HOME = "$env:LOCALAPPDATA\Temp\opencode\tools\jdk-17.0.21+9"   # PAS jdk-17.0.20.1+1 (sans javac)
@@ -29,7 +31,8 @@ SDK : `%LOCALAPPDATA%\Android\Sdk` (plateforme `android-37.0`, build-tools 36.0.
 ```powershell
 & $g :app:compileDebugKotlin   --console=plain
 & $g :app:assembleDebug        --console=plain
-& $g :app:testDebugUnitTest    --console=plain   # 14 tests : protocole ELM, PID, DTC, conso, styles
+& $g :app:testDebugUnitTest    --console=plain   # 18 tests : protocole ELM, PID, DTC, conso, styles
+& $g :app:connectedDebugAndroidTest --console=plain  # 4 tests : persistance, quarantaine, backup, migration
 & $g :app:assembleRelease      --console=plain
 & $adb install -r app\build\outputs\apk\debug\app-debug.apk
 & $adb shell am force-stop com.obd2.jeancyril
@@ -69,9 +72,12 @@ bounds sont fiables.
 - `ObdViewModel.kt` : connexion, polling séquentiel (250 ms + temps ELM ≈ 1 s/tour), vitesse et
   MAF toujours interrogées, historique 300 points/PID, consommation, chrono 0–100, DTC, VIN,
   CRUD véhicules, thème, styles de tuiles, backup.
-- `data/GarageStore.kt` : persistance JSON + photos dans `filesDir/garage/`. Sauvegarde ZIP
-  (`cars.json`, `settings.json`, `images/`), restauration validée avant remplacement. Le fichier
-  de réglages contient tableau de bord, styles, thème clair et véhicule actif.
+- `data/GarageStore.kt` : persistance JSON + photos dans `filesDir/garage/`. Le journal est
+  **append-only** dans `logs/<carId>.jsonl` (aucune réécriture, historique complet conservé) ;
+  `cars.json` ne garde que `logCount`, et les anciens journaux inclus dans `cars.json` sont migrés
+  au chargement. Le journal n'est chargé qu'à l'ouverture de l'écran Journal. Sauvegarde ZIP
+  (`cars.json`, `settings.json`, `images/`, `logs/`, maximum 1 Go), restauration validée avant
+  remplacement.
 - `ui/` : `App.kt` (Scaffold, 5 onglets + sous-pages avec `BackHandler`, en-tête icône/version et
   statut sous la prise), `Changelog.kt` + `ChangelogScreen`, `DashboardScreen`, `SensorsScreen`,
   `DtcScreen`, `ChartsScreen`, `GarageScreen` (plaque, photos, journal, thème), `ToolsScreens`
@@ -92,8 +98,15 @@ bounds sont fiables.
   l'émulateur ; attendre avant de conclure à un blocage (vérifier `pidof` / logcat).
 - **Retour arrière** : les sous-pages sont un état `extra` dans `ObdApp` ; `BackHandler` le vide.
   Toute nouvelle sous-page doit passer par ce même état, pas par une activité séparée.
-- `loadCars`/`loadSettings` tolèrent un JSON corrompu (valeurs par défaut) ; les écritures sont
-  atomiques (`.tmp` + rename), et le thème comme les styles de tuiles sont sauvegardés dedans.
+- `loadCars`/`loadSettings` tolèrent un JSON corrompu en le renommant `.bad` (message affiché) ;
+  les écritures sont atomiques (`.tmp` + rename), et le thème comme les styles de tuiles sont
+  sauvegardés dedans. Le journal n'est jamais dans `cars.json` : il est ajouté ligne par ligne
+  dans `logs/`, donc garder tout l'historique ne ralentit pas les autres écritures.
+- `android:allowBackup="false"` est volontaire : la seule sauvegarde est le ZIP de l'app (VIN,
+  plaque, photos et journal ne doivent pas partir dans le cloud Android sans action).
+- `packageRelease` échoue si `keystore.properties` manque : pas d'APK « release » non signé.
+- Le wrapper Gradle est versionné ; `.\gradlew.bat` fonctionne hors-ligne avec la distribution
+  déjà en cache.
 - **Pas de réflexion** dans l'app : R8 n'a besoin d'aucune règle pour l'instant
   (`app/proguard-rules.pro` vide).
 - Les codes constructeur sont une base **curatée** (Toyota, PSA, Renault/Dacia, VW), pas une

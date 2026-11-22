@@ -25,6 +25,7 @@ android {
         targetSdk = 37
         versionCode = 2
         versionName = appVersionName
+        testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
     }
 
     signingConfigs {
@@ -72,12 +73,27 @@ dependencies {
     implementation("org.jetbrains.kotlinx:kotlinx-coroutines-android:1.9.0")
 
     testImplementation("junit:junit:4.13.2")
+    androidTestImplementation("androidx.test.ext:junit:1.2.1")
+    androidTestImplementation("androidx.test:runner:1.6.2")
 }
 
 androidComponents {
     onVariants(selector().withBuildType("release")) { variant ->
         variant.outputs.forEach { output ->
             output.outputFileName.set("ODB2-$appVersionName-release-$buildStamp.apk")
+        }
+    }
+}
+
+tasks.configureEach {
+    if (name == "packageRelease") {
+        doFirst {
+            if (keystoreProperties.isEmpty()) {
+                throw org.gradle.api.GradleException(
+                    "keystore.properties manquant : la release serait non signée. " +
+                        "Restaurer le fichier et la clé avant de construire.",
+                )
+            }
         }
     }
 }

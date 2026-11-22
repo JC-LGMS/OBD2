@@ -80,11 +80,19 @@ class ObdViewModel(app: Application) : AndroidViewModel(app) {
     private val _message = MutableStateFlow<String?>(null)
     val message: StateFlow<String?> = _message.asStateFlow()
 
+    init {
+        store.loadWarning?.let { _message.value = it }
+    }
+
     private var elm: Elm327? = null
     private var pollJob: Job? = null
+    private var connectJob: Job? = null
+    private var sessionToken = 0
     private var lastTick = 0L
     private var lastSpeed = 0.0
     private val carLock = Any()
+    private val historyLock = Any()
+    private val history = HashMap<String, java.util.ArrayDeque<Sample>>()
 
     fun clearMessage() {
         _message.value = null
@@ -94,11 +102,16 @@ class ObdViewModel(app: Application) : AndroidViewModel(app) {
 
     fun connectSimulator() {
         stopSession()
+        val token = sessionToken
         val session = Elm327(SimulatorLink())
         _connection.value = ConnectionState(ConnStatus.CONNECTING, "Simulateur", "Initialisation…")
-        viewModelScope.launch(Dispatchers.IO) {
+        connectJob = viewModelScope.launch(Dispatchers.IO) {
             runCatching { session.initialize() }
                 .onSuccess {
+                    if (token != sessionToken) {
+                        session.close()
+                        return@onSuccess
+                    }
                     elm = session
                     _connection.value = ConnectionState(ConnStatus.SIMULATOR, "Simulateur ELM327", "Données simulées, aucun véhicule requis")
                     _supported.value = Pids.all.map { it.id }.toSet()
@@ -108,7 +121,9 @@ class ObdViewModel(app: Application) : AndroidViewModel(app) {
                 }
                 .onFailure {
                     session.close()
-                    _connection.value = ConnectionState(ConnStatus.ERROR, "Simulateur", it.message ?: "Échec du simulateur")
+                    if (token == sessionToken) {
+                        _connection.value = ConnectionState(ConnStatus.ERROR, "Simulateur", it.message ?: "Échec du simulateur")
+                    }
                 }
         }
     }
@@ -121,7 +136,8 @@ class ObdViewModel(app: Application) : AndroidViewModel(app) {
             null
         } ?: device.address
         _connection.value = ConnectionState(ConnStatus.CONNECTING, name, "Ouverture de la liaison Bluetooth…")
-        viewModelScope.launch(Dispatchers.IO) {
+        val token = sessionToken
+        connectJob = viewModelScope.launch(Dispatchers.IO) {
             val context = getApplication<Application>()
             // Un dongle BLE n'ouvre pas de socket SPP, et un dongle classique n'expose pas de GATT :
             // on tente la liaison correspondant au type annoncé, puis l'autre en secours.
@@ -131,11 +147,16 @@ class ObdViewModel(app: Application) : AndroidViewModel(app) {
             }
             var lastError = "Connexion impossible"
             for (useBle in attempts) {
+                if (token != sessionToken) return@launch
                 var pendingLink: Link? = null
                 try {
                     pendingLink = if (useBle) BleLink.connect(context, device) else BluetoothLink.connect(device)
                     val session = Elm327(pendingLink)
                     session.initialize()
+                    if (token != sessionToken) {
+                        session.close()
+                        return@launch
+                    }
                     elm = session
                     _connection.value = ConnectionState(
                         ConnStatus.CONNECTED,
@@ -153,7 +174,9 @@ class ObdViewModel(app: Application) : AndroidViewModel(app) {
                     runCatching { pendingLink?.close() }
                 }
             }
-            _connection.value = ConnectionState(ConnStatus.ERROR, name, lastError)
+            if (token == sessionToken) {
+                _connection.value = ConnectionState(ConnStatus.ERROR, name, lastError)
+            }
         }
     }
 
@@ -165,6 +188,9 @@ class ObdViewModel(app: Application) : AndroidViewModel(app) {
     }
 
     private fun stopSession() {
+        sessionToken++
+        connectJob?.cancel()
+        connectJob = null
         pollJob?.cancel()
         pollJob = null
         runCatching { elm?.close() }
@@ -173,6 +199,7 @@ class ObdViewModel(app: Application) : AndroidViewModel(app) {
         lastSpeed = 0.0
         _supported.value = null
         _live.value = LiveState()
+        synchronized(historyLock) { history.clear() }
         _dtcs.value = DtcState()
         _monitor.value = MonitorStatus()
     }
@@ -232,41 +259,58 @@ class ObdViewModel(app: Application) : AndroidViewModel(app) {
     }
 
     private fun publish(values: Map<String, Double>, now: Long) {
-        val history = _live.value.history.toMutableMap()
-        values.forEach { (id, value) ->
-            history[id] = (history[id].orEmpty() + Sample(now, value)).takeLast(300)
+        synchronized(historyLock) {
+            values.forEach { (id, value) ->
+                val samples = history.getOrPut(id) { java.util.ArrayDeque() }
+                samples.addLast(Sample(now, value))
+                while (samples.size > 300) samples.removeFirst()
+            }
         }
         _live.value = LiveState(
             values = _live.value.values + values,
-            history = history,
             updatedAt = now,
         )
     }
 
+    fun history(id: String): List<Sample> = synchronized(historyLock) {
+        history[id]?.toList().orEmpty()
+    }
+
     private fun updateTrip(values: Map<String, Double>, now: Long) {
-        val known = _live.value.values
-        val speed = values["010D"] ?: known["010D"]
-        val fuelRate = values["015E"] ?: known["015E"]
-            ?: (values["0110"] ?: known["0110"])?.let { TripMath.fuelLitersPerHour(it) }
+        val speed = values["010D"]
+        if (speed == null) {
+            lastTick = now
+            return
+        }
+        val diesel = TripMath.looksDiesel(activeCar.value?.engine.orEmpty())
+        val fuelRate = values["015E"]
+            ?: if (!diesel) values["0110"]?.let { TripMath.fuelLitersPerHour(it) } else null
         val dt = if (lastTick == 0L) 0.0 else (now - lastTick) / 1000.0
         if (dt > 0.0) {
-            val (distance, liters) = TripMath.advance(
+            if (dt > 5.0) {
+                // Trou de plusieurs secondes : ne pas inventer distance ni carburant.
+                lastTick = now
+                lastSpeed = speed
+                return
+            }
+            val (distance, accumulatedLiters) = TripMath.advance(
                 _fuel.value.distanceKm,
                 _fuel.value.liters,
                 speed,
                 fuelRate,
                 dt,
             )
+            val liters = if (fuelRate != null) accumulatedLiters else _fuel.value.liters
             _fuel.value = FuelState(
-                instant = speed?.let { TripMath.instantL100(it, fuelRate) },
-                average = if (distance > 0.05) liters / distance * 100.0 else null,
+                instant = TripMath.instantL100(speed, fuelRate),
+                average = if (fuelRate != null && distance > 0.05) liters / distance * 100.0 else null,
                 distanceKm = distance,
                 liters = liters,
             )
             updateAccel(speed, now, dt)
         }
         lastTick = now
-        if (speed != null) lastSpeed = speed
+        lastSpeed = speed
     }
 
     private fun updateAccel(speed: Double?, now: Long, dt: Double) {
@@ -403,6 +447,10 @@ class ObdViewModel(app: Application) : AndroidViewModel(app) {
     // ------------------------------------------------------------------ véhicule
 
     fun selectCar(id: String) {
+        val previous = _settings.value.activeCar
+        if (previous != null && previous != id) {
+            updateCarMemory(previous) { it.copy(log = emptyList()) }
+        }
         updateSettings { it.copy(activeCar = id) }
     }
 
@@ -440,11 +488,12 @@ class ObdViewModel(app: Application) : AndroidViewModel(app) {
 
     fun deleteCar(id: String) {
         val car = _cars.value.firstOrNull { it.id == id } ?: return
-        car.images.forEach { store.deleteImage(it) }
         synchronized(carLock) {
             _cars.value = _cars.value.filterNot { it.id == id }
             store.saveCars(_cars.value)
         }
+        car.images.forEach { store.deleteImage(it) }
+        store.deleteLog(id)
         if (_settings.value.activeCar == id) {
             updateSettings { it.copy(activeCar = _cars.value.firstOrNull()?.id) }
         }
@@ -483,7 +532,28 @@ class ObdViewModel(app: Application) : AndroidViewModel(app) {
 
     fun log(kind: String, text: String) {
         val id = _settings.value.activeCar ?: return
-        updateCar(id) { car -> car.copy(log = car.log + LogEntry(kind = kind, text = text)) }
+        val entry = LogEntry(kind = kind, text = text)
+        store.appendLog(id, entry)
+        updateCar(id) { car ->
+            car.copy(log = car.log + entry, logCount = car.logCount + 1)
+        }
+    }
+
+    /** Charge le journal complet du véhicule à la demande (écran Journal). */
+    fun loadJournal(carId: String? = _settings.value.activeCar) {
+        if (carId == null) return
+        viewModelScope.launch(Dispatchers.IO) {
+            val entries = store.loadLog(carId)
+            updateCarMemory(carId) {
+                it.copy(log = entries, logCount = maxOf(it.logCount, entries.size))
+            }
+        }
+    }
+
+    private fun updateCarMemory(id: String, transform: (Car) -> Car) {
+        synchronized(carLock) {
+            _cars.value = _cars.value.map { if (it.id == id) transform(it) else it }
+        }
     }
 
     private fun updateCar(id: String, transform: (Car) -> Car) {
@@ -549,6 +619,7 @@ class ObdViewModel(app: Application) : AndroidViewModel(app) {
                 .onSuccess { summary ->
                     _cars.value = store.loadCars()
                     _settings.value = store.loadSettings()
+                    loadJournal()
                     log("sauvegarde", "Sauvegarde restaurée : $summary")
                     _message.value = "Sauvegarde restaurée : $summary"
                 }

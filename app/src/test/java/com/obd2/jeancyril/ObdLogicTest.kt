@@ -56,6 +56,28 @@ class ObdLogicTest {
     }
 
     @Test
+    fun readIso9141SingleDtc() {
+        assertEquals(listOf("P0133"), Protocol.dtcs("43 01 01 33", 0x43))
+    }
+
+    @Test
+    fun canFourDtcsStartingWith03AreNotMistakenForCount() {
+        assertEquals(
+            listOf("P0300", "P0301", "P0302", "P0303"),
+            Protocol.dtcs("43 03 00 03 01 03 02 03 03", 0x43, canBus = true),
+        )
+    }
+
+    @Test
+    fun legacyDtcWithTrailingChecksumIsParsed() {
+        assertEquals(listOf("P0133"), Protocol.dtcs("43 01 01 33 5F", 0x43, canBus = false))
+        assertEquals(
+            listOf("P0133", "P0420"),
+            Protocol.dtcs("43 02 01 33 04 20 5F", 0x43, canBus = false),
+        )
+    }
+
+    @Test
     fun monitorStatus() {
         val monitor = Protocol.monitor("41 01 82 07 65 04")
         assertTrue(monitor.read)
@@ -113,5 +135,15 @@ class ObdLogicTest {
         assertEquals(SensorStyles.DIGITAL, SensorStyles.defaultFor("0142"))
         assertEquals(SensorStyles.DIGITAL, SensorStyles.next(SensorStyles.DIAL))
         assertEquals(SensorStyles.DIAL, SensorStyles.next(SensorStyles.BAR))
+    }
+
+    @Test
+    fun dieselEngineDetection() {
+        assertTrue(TripMath.looksDiesel("1.5 dCi 95"))
+        assertTrue(TripMath.looksDiesel("2.0 TDI"))
+        assertTrue(TripMath.looksDiesel("1.6 HDi"))
+        assertTrue(TripMath.looksDiesel("BlueHDi 130"))
+        assertFalse(TripMath.looksDiesel("1.2 PureTech 82"))
+        assertFalse(TripMath.looksDiesel("1.4 TSI"))
     }
 }

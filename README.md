@@ -15,18 +15,19 @@ véhicules et sauvegarde.
   ou cadran.
 - Courbes temporelles, mesure 0–100 km/h et accélération en g, consommation instantanée/moyenne.
 - Profils véhicules : marque, modèle, année, moteur, VIN, plaque, plusieurs photos, journal
-  des actions.
+  complet des actions (conservé sans limite, fichier séparé).
 - Thème sombre ou clair, sauvegarde/restauration ZIP (véhicules, photos, journal, réglages).
 - Simulateur ELM327 intégré pour tester sans dongle ni véhicule.
 
 ## Compilation
 
-Prérequis : JDK 17, Android SDK 37, Gradle 9.9.1 (ou wrapper), AGP 9.5.1 (Kotlin intégré).
+Prérequis : JDK 17, Android SDK 37, AGP 9.5.1 (Kotlin intégré). Le wrapper Gradle 9.9.1 est fourni.
 
 ```powershell
-gradle :app:assembleDebug
-gradle :app:testDebugUnitTest
-gradle :app:assembleRelease
+.\gradlew.bat :app:assembleDebug
+.\gradlew.bat :app:testDebugUnitTest
+.\gradlew.bat :app:connectedDebugAndroidTest   # émulateur ou appareil
+.\gradlew.bat :app:assembleRelease
 ```
 
 L'APK de release est nommé `ODB2-<version>-release-<date>.apk` et signé avec la clé locale

@@ -44,7 +44,7 @@ fun ChartsScreen(vm: ObdViewModel, modifier: Modifier = Modifier) {
         .ifEmpty { Settings.DEFAULT_DASHBOARD.mapNotNull { Pids.byId(it) } }
     val current = sensors.firstOrNull { it.id == selectedId } ?: sensors.firstOrNull()
     val override = current?.let { settings.overrides[it.id] }
-    val samples = current?.let { live.history[it.id] }.orEmpty()
+    val samples = current?.let { vm.history(it.id) }.orEmpty()
 
     LazyColumn(
         modifier

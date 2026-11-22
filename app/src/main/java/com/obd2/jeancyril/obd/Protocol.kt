@@ -41,11 +41,18 @@ object Protocol {
         return null
     }
 
-    fun dtcs(response: String, header: Int): List<String> {
+    fun dtcs(response: String, header: Int, canBus: Boolean? = null): List<String> {
         var data = payload(response, header) ?: return emptyList()
-        // Anciens protocoles (ISO 9141/KWP) : premier octet = nombre de codes.
-        if (data.size % 2 == 1 && data[0] == data.size / 2) {
-            data = data.copyOfRange(1, data.size)
+        // Anciens protocoles (ISO 9141/KWP) : premier octet = nombre de codes, parfois suivi
+        // d'un checksum. Sur CAN, ce compteur n'existe pas.
+        if (data.isNotEmpty() && canBus != true && data[0] in 1..6) {
+            val count = data[0]
+            val expected = count * 2
+            val legacyLayout = canBus == false || (data.size % 2 == 1 && count == data.size / 2)
+            if (legacyLayout && data.size in expected + 1..expected + 2) {
+                data = data.copyOfRange(1, data.size)
+                if (data.size % 2 == 1) data = data.copyOfRange(0, data.size - 1)
+            }
         }
         val codes = ArrayList<String>()
         var i = 0

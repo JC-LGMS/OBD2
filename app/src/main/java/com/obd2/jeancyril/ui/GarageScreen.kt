@@ -157,7 +157,7 @@ fun GarageScreen(vm: ObdViewModel, modifier: Modifier = Modifier, onOpenExtra: (
                                 listOf(
                                     car.subtitle,
                                     car.plate.takeIf { it.isNotBlank() }?.let { "Plaque $it" },
-                                    "${car.log.size} action(s) · ${car.images.size} photo(s)",
+                                    "${car.logCount} action(s) · ${car.images.size} photo(s)",
                                 ).filterNotNull().joinToString(" · "),
                                 style = MaterialTheme.typography.labelSmall,
                                 color = MaterialTheme.colorScheme.onSurfaceVariant,

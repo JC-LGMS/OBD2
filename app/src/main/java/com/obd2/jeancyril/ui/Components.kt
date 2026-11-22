@@ -386,16 +386,6 @@ fun MiniStat(
 }
 
 @Composable
-fun InfoDialog(title: String, text: String, onDismiss: () -> Unit) {
-    AlertDialog(
-        onDismissRequest = onDismiss,
-        confirmButton = { TextButton(onClick = onDismiss) { Text("Fermer") } },
-        title = { Text(title) },
-        text = { Text(text) },
-    )
-}
-
-@Composable
 fun ConfirmDialog(
     title: String,
     text: String,

@@ -17,6 +17,8 @@ data class Car(
     val vin: String = "",
     val plate: String = "",
     val images: List<String> = emptyList(),
+    val logCount: Int = 0,
+    /** Journal chargé à la demande ; jamais écrit dans cars.json. */
     val log: List<LogEntry> = emptyList(),
 ) {
     val title: String
@@ -94,7 +96,6 @@ data class ConnectionState(
 
 data class LiveState(
     val values: Map<String, Double> = emptyMap(),
-    val history: Map<String, List<Sample>> = emptyMap(),
     val updatedAt: Long = 0L,
 )
 

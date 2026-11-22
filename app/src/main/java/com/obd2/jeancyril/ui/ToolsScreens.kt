@@ -95,7 +95,7 @@ fun ConnectionScreen(vm: ObdViewModel, modifier: Modifier = Modifier) {
             .padding(12.dp),
         verticalArrangement = Arrangement.spacedBy(10.dp),
     ) {
-        ConnectionBanner(connection) {}
+        ConnectionBanner(connection) { refresh++ }
         Card(colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface)) {
             Column(Modifier.padding(14.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
                 Text("État de la liaison", style = MaterialTheme.typography.titleSmall)
@@ -318,7 +318,10 @@ fun FuelScreen(vm: ObdViewModel, modifier: Modifier = Modifier) {
                 }
                 Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceEvenly) {
                     StatColumn("Distance", "${formatValue(fuel.distanceKm, 1)} km")
-                    StatColumn("Carburant", "${formatValue(fuel.liters, 2)} L")
+                    StatColumn(
+                        "Carburant",
+                        if (fuel.average != null) "${formatValue(fuel.liters, 2)} L" else "—",
+                    )
                 }
             }
         }
@@ -332,7 +335,7 @@ fun FuelScreen(vm: ObdViewModel, modifier: Modifier = Modifier) {
             Column(Modifier.padding(14.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
                 Text("Calcul", style = MaterialTheme.typography.titleSmall, fontWeight = FontWeight.SemiBold)
                 Text(
-                    "La consommation est déduite du débit d'air (MAF) et d'un rapport stœchiométrique essence de 14,7:1 (masse volumique 745 g/L). Si le calculateur expose le PID 015E, c'est lui qui est utilisé.\n\nLa vitesse provient du PID 010D : sur certains véhicules, elle n'est pas disponible au ralenti. Les résultats sont indicatifs et ne remplacent pas un calcul de plein à plein. Les hybrides et les moteurs à injection directe peuvent s'écarter du modèle.",
+                    "La consommation est déduite du débit d'air (MAF) et d'un rapport stœchiométrique essence de 14,7:1 (masse volumique 745 g/L) sur les moteurs essence. Sur diesel, elle n'est calculée que si le calculateur expose le PID 015E ; sinon elle reste vide plutôt que fausse.\n\nLa vitesse provient du PID 010D : sur certains véhicules, elle n'est pas disponible au ralenti. Les résultats sont indicatifs et ne remplacent pas un calcul de plein à plein.",
                     style = MaterialTheme.typography.bodySmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                 )
@@ -345,6 +348,8 @@ fun FuelScreen(vm: ObdViewModel, modifier: Modifier = Modifier) {
 fun JournalScreen(vm: ObdViewModel, modifier: Modifier = Modifier) {
     val car by vm.activeCar.collectAsState()
     var addingNote by remember { mutableStateOf(false) }
+
+    LaunchedEffect(car?.id) { vm.loadJournal(car?.id) }
 
     LazyColumn(
         modifier
@@ -368,7 +373,7 @@ fun JournalScreen(vm: ObdViewModel, modifier: Modifier = Modifier) {
                         Column(Modifier.weight(1f)) {
                             Text(current.title, style = MaterialTheme.typography.titleMedium)
                             Text(
-                                "${current.log.size} action(s) enregistrée(s)",
+                                "${current.logCount} action(s) enregistrée(s)",
                                 style = MaterialTheme.typography.labelSmall,
                                 color = MaterialTheme.colorScheme.onSurfaceVariant,
                             )
@@ -378,9 +383,14 @@ fun JournalScreen(vm: ObdViewModel, modifier: Modifier = Modifier) {
                 }
             }
         }
-        val entries = car?.log?.sortedByDescending { it.at }.orEmpty()
+        val entries = car?.log?.asReversed().orEmpty()
         if (entries.isEmpty() && car != null) {
-            item { EmptyHint("Aucune action enregistrée. Connexions, lectures de codes, effacements, mesures et notes apparaîtront ici.") }
+            item {
+                EmptyHint(
+                    if ((car?.logCount ?: 0) > 0) "Chargement du journal…"
+                    else "Aucune action enregistrée. Connexions, lectures de codes, effacements, mesures et notes apparaîtront ici.",
+                )
+            }
         }
         items(entries) { entry -> LogRow(entry) }
         item {
@@ -461,7 +471,7 @@ fun BackupScreen(vm: ObdViewModel, modifier: Modifier = Modifier) {
         if (uri != null) vm.importBackup(uri)
     }
     val photos = cars.sumOf { it.images.size }
-    val actions = cars.sumOf { it.log.size }
+    val actions = cars.sumOf { it.logCount }
     val stamp = remember { SimpleDateFormat("yyyyMMdd-HHmm", Locale.FRANCE).format(Date()) }
 
     Column(

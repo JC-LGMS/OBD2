@@ -15,18 +15,42 @@ import java.util.zip.ZipOutputStream
  * Persistance locale : un fichier JSON pour le garage, un pour les réglages,
  * et les photos dans filesDir/garage/images. Aucune dépendance externe.
  */
-class GarageStore(private val context: Context) {
-    private val root = File(context.filesDir, "garage").apply { mkdirs() }
+class GarageStore(private val context: Context, rootOverride: File? = null) {
+    private val root = (rootOverride ?: File(context.filesDir, "garage")).apply { mkdirs() }
     private val imagesDir = File(root, "images").apply { mkdirs() }
+    private val logsDir = File(root, "logs").apply { mkdirs() }
     private val carsFile = File(root, "cars.json")
     private val settingsFile = File(root, "settings.json")
 
+    companion object {
+        private const val MAX_BACKUP_BYTES = 1024L * 1024 * 1024
+        private const val MAX_IMAGE_BYTES = 20L * 1024 * 1024
+    }
+
+    @Volatile
+    var loadWarning: String? = null
+        private set
+
     @Synchronized
-    fun loadCars(): List<Car> = runCatching {
-        if (!carsFile.exists()) return emptyList()
-        val array = JSONArray(carsFile.readText())
-        (0 until array.length()).map { carFromJson(array.getJSONObject(it)) }
-    }.getOrDefault(emptyList())
+    fun loadCars(): List<Car> = try {
+        if (!carsFile.exists()) {
+            emptyList()
+        } else {
+            val array = JSONArray(carsFile.readText())
+            val cars = (0 until array.length()).map { carFromJson(array.getJSONObject(it)) }
+            // Migration des anciennes versions : le journal était stocké dans cars.json.
+            cars.forEach { car ->
+                if (car.log.isNotEmpty() && !hasLog(car.id)) {
+                    appendEntries(car.id, car.log)
+                }
+            }
+            cars.map { it.copy(log = emptyList()) }
+        }
+    } catch (e: Exception) {
+        quarantine(carsFile)
+        loadWarning = "Le fichier des véhicules était illisible : une copie .bad a été conservée."
+        emptyList()
+    }
 
     @Synchronized
     fun saveCars(cars: List<Car>) {
@@ -36,10 +60,17 @@ class GarageStore(private val context: Context) {
     }
 
     @Synchronized
-    fun loadSettings(): Settings = runCatching {
-        if (!settingsFile.exists()) return Settings()
-        settingsFromJson(JSONObject(settingsFile.readText()))
-    }.getOrDefault(Settings())
+    fun loadSettings(): Settings = try {
+        if (!settingsFile.exists()) {
+            Settings()
+        } else {
+            settingsFromJson(JSONObject(settingsFile.readText()))
+        }
+    } catch (e: Exception) {
+        quarantine(settingsFile)
+        loadWarning = "Le fichier des réglages était illisible : une copie .bad a été conservée."
+        Settings()
+    }
 
     private fun settingsFromJson(json: JSONObject): Settings {
         val dashboard = json.optJSONArray("dashboard")?.let { array ->
@@ -110,7 +141,61 @@ class GarageStore(private val context: Context) {
         imageFile(name).delete()
     }
 
+    fun logFile(carId: String): File = File(logsDir, "${File(carId).name}.jsonl")
+
+    private fun hasLog(carId: String): Boolean =
+        logFile(carId).let { it.exists() && it.length() > 0 }
+
+    @Synchronized
+    fun appendLog(carId: String, entry: LogEntry) = appendEntries(carId, listOf(entry))
+
+    private fun appendEntries(carId: String, entries: List<LogEntry>) {
+        if (entries.isEmpty()) return
+        logsDir.mkdirs()
+        java.io.FileOutputStream(logFile(carId), true).bufferedWriter(Charsets.UTF_8).use { writer ->
+            entries.forEach { entry ->
+                writer.write(entryToJson(entry).toString())
+                writer.newLine()
+            }
+        }
+    }
+
+    @Synchronized
+    fun loadLog(carId: String): List<LogEntry> {
+        val file = logFile(carId)
+        if (!file.exists()) return emptyList()
+        return runCatching {
+            file.bufferedReader(Charsets.UTF_8).useLines { lines ->
+                lines.mapNotNull { line ->
+                    runCatching { entryFromJson(JSONObject(line)) }.getOrNull()
+                }.toList()
+            }
+        }.getOrDefault(emptyList())
+    }
+
+    @Synchronized
+    fun deleteLog(carId: String) {
+        logFile(carId).delete()
+    }
+
+    private fun entryToJson(entry: LogEntry): JSONObject = JSONObject().apply {
+        put("at", entry.at)
+        put("kind", entry.kind)
+        put("text", entry.text)
+    }
+
+    private fun entryFromJson(json: JSONObject): LogEntry = LogEntry(
+        at = json.optLong("at", System.currentTimeMillis()),
+        kind = json.optString("kind", "info"),
+        text = json.optString("text", ""),
+    )
+
     fun exportBackup(uri: Uri) {
+        val files = (imagesDir.listFiles()?.toList().orEmpty() + logsDir.listFiles()?.toList().orEmpty())
+        val totalBytes = carsFile.length() + settingsFile.length() + files.sumOf { it.length() }
+        if (totalBytes > MAX_BACKUP_BYTES) {
+            throw IOException("Sauvegarde trop volumineuse (maximum 1 Go)")
+        }
         val output = context.contentResolver.openOutputStream(uri)
             ?: throw IOException("Impossible d'écrire le fichier choisi")
         output.use { stream ->
@@ -126,53 +211,113 @@ class GarageStore(private val context: Context) {
                     file.inputStream().use { it.copyTo(zip) }
                     zip.closeEntry()
                 }
+                logsDir.listFiles()?.forEach { file ->
+                    zip.putNextEntry(ZipEntry("logs/${file.name}"))
+                    file.inputStream().use { it.copyTo(zip) }
+                    zip.closeEntry()
+                }
             }
         }
     }
 
     /** Restaure une sauvegarde ZIP. Les données existantes ne sont remplacées qu'après validation. */
     fun importBackup(uri: Uri): String {
-        val entries = LinkedHashMap<String, ByteArray>()
+        val temp = File(context.cacheDir, "restore-${System.nanoTime()}").apply { mkdirs() }
+        val tempImages = File(temp, "images").apply { mkdirs() }
+        val tempLogs = File(temp, "logs").apply { mkdirs() }
+        var carsBytes: ByteArray? = null
+        var settingsBytes: ByteArray? = null
         var total = 0L
-        val input = context.contentResolver.openInputStream(uri)
-            ?: throw IOException("Impossible de lire le fichier choisi")
-        input.use { stream ->
-            ZipInputStream(stream).use { zip ->
-                while (true) {
-                    val entry = zip.nextEntry ?: break
-                    val name = entry.name.replace('\\', '/')
-                    val allowed = name == "cars.json" || name == "settings.json" ||
-                        (name.startsWith("images/") && !name.endsWith("/"))
-                    if (!allowed) continue
-                    val bytes = readCapped(zip, 8 * 1024 * 1024)
-                        ?: throw IOException("Image trop volumineuse dans la sauvegarde")
-                    total += bytes.size
-                    if (total > 40L * 1024 * 1024) throw IOException("Sauvegarde trop volumineuse")
-                    entries[name] = bytes
+        try {
+            val input = context.contentResolver.openInputStream(uri)
+                ?: throw IOException("Impossible de lire le fichier choisi")
+            input.use { stream ->
+                ZipInputStream(stream).use { zip ->
+                    while (true) {
+                        val entry = zip.nextEntry ?: break
+                        val name = entry.name.replace('\\', '/')
+                        when {
+                            name == "cars.json" -> {
+                                carsBytes = readCapped(zip, 8L * 1024 * 1024)
+                                    ?: throw IOException("cars.json trop volumineux")
+                                total += carsBytes!!.size
+                            }
+                            name == "settings.json" -> {
+                                settingsBytes = readCapped(zip, 1024L * 1024)
+                                    ?: throw IOException("settings.json trop volumineux")
+                                total += settingsBytes!!.size
+                            }
+                            name.startsWith("images/") && !name.endsWith("/") -> {
+                                val target = File(tempImages, File(name).name)
+                                val written = copyCapped(zip, target, MAX_IMAGE_BYTES)
+                                    ?: throw IOException("Image trop volumineuse dans la sauvegarde")
+                                total += written
+                            }
+                            name.startsWith("logs/") && !name.endsWith("/") -> {
+                                val target = File(tempLogs, File(name).name)
+                                val remaining = MAX_BACKUP_BYTES - total
+                                val written = copyCapped(zip, target, remaining)
+                                    ?: throw IOException("Sauvegarde trop volumineuse (maximum 1 Go)")
+                                total += written
+                            }
+                        }
+                        if (total > MAX_BACKUP_BYTES) throw IOException("Sauvegarde trop volumineuse (maximum 1 Go)")
+                    }
                 }
             }
-        }
-        val carsText = entries["cars.json"]?.let { String(it) }
-            ?: throw IOException("Sauvegarde invalide : cars.json manquant")
-        val carsArray = try {
-            JSONArray(carsText)
-        } catch (e: Exception) {
-            throw IOException("Sauvegarde invalide : cars.json illisible")
-        }
-        val cars = (0 until carsArray.length()).map { carFromJson(carsArray.getJSONObject(it)) }
-        val settings = entries["settings.json"]?.let { bytes ->
-            runCatching { settingsFromJson(JSONObject(String(bytes))) }.getOrNull()
-        } ?: Settings()
+            val carsText = carsBytes?.let { String(it) }
+                ?: throw IOException("Sauvegarde invalide : cars.json manquant")
+            val carsArray = try {
+                JSONArray(carsText)
+            } catch (e: Exception) {
+                throw IOException("Sauvegarde invalide : cars.json illisible")
+            }
+            val parsedCars = (0 until carsArray.length()).map { carFromJson(carsArray.getJSONObject(it)) }
+            val settings = settingsBytes?.let { bytes ->
+                runCatching { settingsFromJson(JSONObject(String(bytes))) }.getOrNull()
+            } ?: Settings()
 
-        saveCars(cars)
-        saveSettings(settings)
-        entries.filterKeys { it.startsWith("images/") }.forEach { (name, bytes) ->
-            imageFile(name.removePrefix("images/")).writeBytes(bytes)
+            // Images et journaux d'abord : si une copie échoue, cars.json reste cohérent.
+            tempImages.listFiles()?.forEach { file ->
+                val destination = imageFile(file.name)
+                if (!file.renameTo(destination)) file.copyTo(destination, overwrite = true)
+            }
+            tempLogs.listFiles()?.forEach { file ->
+                val destination = File(logsDir, file.name)
+                if (!file.renameTo(destination)) file.copyTo(destination, overwrite = true)
+            }
+            val cars = parsedCars.map { car ->
+                if (car.log.isNotEmpty() && !hasLog(car.id)) {
+                    appendEntries(car.id, car.log)
+                    car.copy(logCount = maxOf(car.logCount, car.log.size), log = emptyList())
+                } else {
+                    car.copy(log = emptyList())
+                }
+            }
+            saveCars(cars)
+            saveSettings(settings)
+            return "${cars.size} véhicule(s) restauré(s)"
+        } finally {
+            temp.deleteRecursively()
         }
-        return "${cars.size} véhicule(s) restauré(s)"
     }
 
-    private fun readCapped(input: java.io.InputStream, limit: Int): ByteArray? {
+    private fun copyCapped(input: java.io.InputStream, target: File, limit: Long): Long? {
+        var total = 0L
+        val buffer = ByteArray(8192)
+        target.outputStream().use { output ->
+            while (true) {
+                val count = input.read(buffer)
+                if (count < 0) break
+                total += count
+                if (total > limit) return null
+                output.write(buffer, 0, count)
+            }
+        }
+        return total
+    }
+
+    private fun readCapped(input: java.io.InputStream, limit: Long): ByteArray? {
         val output = java.io.ByteArrayOutputStream()
         val buffer = ByteArray(8192)
         while (true) {
@@ -180,6 +325,23 @@ class GarageStore(private val context: Context) {
             if (count < 0) return output.toByteArray()
             output.write(buffer, 0, count)
             if (output.size() > limit) return null
+        }
+    }
+
+    private fun quarantine(file: File) {
+        if (!file.exists()) return
+        val base = File(file.parentFile, file.name + ".bad")
+        var target = base
+        var index = 1
+        while (target.exists()) {
+            target = File(file.parentFile, "${base.name}.$index")
+            index++
+        }
+        runCatching {
+            if (!file.renameTo(target)) {
+                file.copyTo(target)
+                file.delete()
+            }
         }
     }
 
@@ -201,15 +363,7 @@ class GarageStore(private val context: Context) {
         put("vin", car.vin)
         put("plate", car.plate)
         put("images", JSONArray(car.images))
-        put("log", JSONArray().apply {
-            car.log.forEach { entry ->
-                put(JSONObject().apply {
-                    put("at", entry.at)
-                    put("kind", entry.kind)
-                    put("text", entry.text)
-                })
-            }
-        })
+        put("logCount", car.logCount)
     }
 
     private fun carFromJson(json: JSONObject): Car {
@@ -226,6 +380,7 @@ class GarageStore(private val context: Context) {
                 )
             }
         } ?: emptyList()
+        val logCount = if (json.has("logCount")) json.optInt("logCount", log.size) else log.size
         return Car(
             id = json.optString("id").ifBlank { UUID.randomUUID().toString() },
             brand = json.optString("brand"),
@@ -235,6 +390,7 @@ class GarageStore(private val context: Context) {
             vin = json.optString("vin"),
             plate = json.optString("plate"),
             images = images,
+            logCount = logCount,
             log = log,
         )
     }

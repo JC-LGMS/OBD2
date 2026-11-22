@@ -54,7 +54,14 @@ class Elm327(private val link: Link) {
             "0A" -> 0x4A
             else -> throw IllegalArgumentException("Mode DTC inconnu : $mode")
         }
-        return Protocol.dtcs(raw(mode), header)
+        return Protocol.dtcs(raw(mode), header, isCanBus())
+    }
+
+    /** Le protocole 6 à 9 est du CAN (ISO 15765) : sa réponse n'a pas d'octet de comptage. */
+    private fun isCanBus(): Boolean? {
+        val reply = raw("ATDPN").uppercase()
+        val number = reply.filter { it.isDigit() }.lastOrNull()?.digitToIntOrNull() ?: return null
+        return number in 6..9
     }
 
     fun readMonitor(): MonitorStatus = Protocol.monitor(raw("0101"))
